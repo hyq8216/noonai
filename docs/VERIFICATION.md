@@ -89,3 +89,11 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
   backend job 及总体工作流失败，不能声称完整系统通过或具备真实卖家验收。
 - 修复 PR：https://github.com/hyq8216/noonai/pull/2 ，未合并；main 仍需单独授权同步。
   账号环境的兼容内联配置及发布状态另行验收，不能由此 PR 推断已发布。
+
+账号环境 main 基线独立复验：
+- 在 6d2276e572e9ddcdd3d3ec71a9985a1ade7c1e2f 上执行等价内联安装，
+  不依赖尚未合并的 runtime.sh / with-runtime.sh，也不修改 tracked 文件。
+- Python 3.12.14 / Node 22.23.3 / Chromium 145.0.7632.6；pip check、
+  ready.json 实际端口 HTTP 200、独立启动/重启及六页浏览器检查全部通过。
+- 373 tests in 58.217s，24 failures / 16 errors，40项失败名称与修复分支相同。
+- 账号内联安装和启动技能草稿已保存；环境发布需以账号界面独立回读为准。
