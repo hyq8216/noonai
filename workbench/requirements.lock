@@ -1,0 +1,13 @@
+# Runtime dependencies from the existing 0.42 build; no desktop packaging tools.
+boto3==1.43.107
+botocore==1.43.107
+cffi==2.1.1
+cryptography==47.0.0
+imageio-ffmpeg==0.6.0
+jmespath==1.1.0
+pillow==12.3.0
+pycparser==3.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.2
+six==1.17.0
+urllib3==2.8.0
