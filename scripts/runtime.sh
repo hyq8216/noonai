@@ -3,7 +3,14 @@
 NOON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export npm_config_cache="$NOON_ROOT/.cloud-runtime/cache/npm"
 export PIP_CACHE_DIR="$NOON_ROOT/.cloud-runtime/cache/pip"
-export PLAYWRIGHT_BROWSERS_PATH="$NOON_ROOT/.cloud-runtime/cache/playwright"
+NOON_PREPARED_BROWSERS="$(dirname "$NOON_ROOT")/.noonai-assets/playwright"
+if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
+  if [[ -d "$NOON_PREPARED_BROWSERS" ]]; then
+    export PLAYWRIGHT_BROWSERS_PATH="$NOON_PREPARED_BROWSERS"
+  else
+    export PLAYWRIGHT_BROWSERS_PATH="$NOON_ROOT/.cloud-runtime/cache/playwright"
+  fi
+fi
 mkdir -p "$npm_config_cache" "$PIP_CACHE_DIR" "$PLAYWRIGHT_BROWSERS_PATH"
 NOON_NODE_BIN="$NOON_ROOT/.cloud-runtime/tools/node_modules/.bin"
 if [[ -x "$NOON_NODE_BIN/node" ]]; then
