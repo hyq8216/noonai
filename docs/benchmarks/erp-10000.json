@@ -1,0 +1,417 @@
+{
+  "schema_version": 2,
+  "synthetic_only": true,
+  "clock": "perf_counter",
+  "repeats": 3,
+  "timing_basis": "Best of three local calls; JSON encoding reported separately except multi-page traversal, which includes encoding. tracemalloc is enabled throughout and adds overhead. No warm/cold cache or service-level guarantee.",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux",
+    "sqlite": "3.53.1"
+  },
+  "dataset": {
+    "products": 10000,
+    "orders": 1000,
+    "purchases": 200,
+    "finance_entries": 300,
+    "inventory_rows": 10000,
+    "intake_receipts": 25,
+    "shipped_orders": 100,
+    "pricing_drafts": 2,
+    "pricing_members_per_draft": 500,
+    "shipping_manifests": 1,
+    "manifest_packages": 100,
+    "ad_reports": 1000,
+    "ad_report_batches": 1,
+    "document_lines": 2,
+    "synthetic_order_age_days": 2,
+    "seed_db_counts": {
+      "products": 10000,
+      "ops_documents": 1200,
+      "ops_stock": 10000,
+      "finance_entries": 300,
+      "order_intake_receipts": 25,
+      "pricing_plans": 2,
+      "shipping_manifests": 1,
+      "shipping_manifest_orders": 100,
+      "ad_records": 1000,
+      "ad_batches": 1
+    }
+  },
+  "seed_ms": {
+    "module_initialization": 8.755,
+    "products": 3195.624,
+    "inventory": 1752.224,
+    "orders": 510.939,
+    "purchases": 72.287,
+    "finance": 79.017,
+    "intake_receipts": 89.257,
+    "pricing_drafts": 1115.902,
+    "reserve_and_ship_100_orders": 72.597,
+    "manifest_100_packages": 120.62,
+    "advertising_1000_reports": 810.281
+  },
+  "measurements": [
+    {
+      "name": "catalog_bootstrap_first_500",
+      "best_ms": 41.002,
+      "samples_ms": [
+        45.716,
+        43.557,
+        41.002
+      ],
+      "json_encode_best_ms": 59.721,
+      "json_bytes": 1145194,
+      "returned_rows": 500
+    },
+    {
+      "name": "catalog_bootstrap_10000_500_per_page",
+      "returned_rows": 10000,
+      "bootstrap_pages": 20,
+      "requests": 21,
+      "json_bytes": 22903504,
+      "max_page_json_bytes": 1145194,
+      "max_page_rows": 500,
+      "best_ms": 2369.334,
+      "samples_ms": [
+        2762.863,
+        2369.334,
+        2412.889
+      ],
+      "timing_basis": "Complete server traversal including JSON encoding; retains product IDs only, not a browser product cache"
+    },
+    {
+      "name": "catalog_initial_10000",
+      "best_ms": 1175.984,
+      "samples_ms": [
+        1302.639,
+        1308.661,
+        1175.984
+      ],
+      "json_encode_best_ms": 1315.903,
+      "json_bytes": 22900083,
+      "returned_rows": 10000
+    },
+    {
+      "name": "catalog_same_token",
+      "best_ms": 153.367,
+      "samples_ms": [
+        153.367,
+        159.471,
+        160.999
+      ],
+      "json_encode_best_ms": 0.072,
+      "json_bytes": 96,
+      "returned_rows": 0
+    },
+    {
+      "name": "catalog_single_change",
+      "best_ms": 175.176,
+      "samples_ms": [
+        175.176,
+        189.228,
+        190.242
+      ],
+      "json_encode_best_ms": 0.214,
+      "json_bytes": 2478,
+      "returned_rows": 1
+    },
+    {
+      "name": "catalog_1000_changes_500_per_page",
+      "best_ms": 318.787,
+      "samples_ms": [
+        342.795,
+        318.787,
+        385.425
+      ],
+      "returned_rows": 1000,
+      "json_bytes": 2343177,
+      "pages": [
+        {
+          "rows": 500,
+          "json_bytes": 1171533
+        },
+        {
+          "rows": 500,
+          "json_bytes": 1171644
+        }
+      ]
+    },
+    {
+      "name": "catalog_groups_100_skus",
+      "best_ms": 91.097,
+      "samples_ms": [
+        117.949,
+        126.674,
+        91.097
+      ],
+      "json_encode_best_ms": 1.457,
+      "json_bytes": 20764,
+      "returned_rows": 100
+    },
+    {
+      "name": "batch_editor_50_skus",
+      "best_ms": 27.349,
+      "samples_ms": [
+        35.55,
+        27.544,
+        27.349
+      ],
+      "json_encode_best_ms": 1.146,
+      "json_bytes": 16880,
+      "returned_rows": 50
+    },
+    {
+      "name": "order_intake_20_receipts",
+      "best_ms": 1.002,
+      "samples_ms": [
+        1.066,
+        1.043,
+        1.002
+      ],
+      "json_encode_best_ms": 0.448,
+      "json_bytes": 6834,
+      "returned_rows": 20
+    },
+    {
+      "name": "analytics_50_skus",
+      "best_ms": 429.098,
+      "samples_ms": [
+        458.961,
+        557.205,
+        429.098
+      ],
+      "json_encode_best_ms": 1.786,
+      "json_bytes": 17779,
+      "returned_rows": 50
+    },
+    {
+      "name": "operations_orders_50",
+      "best_ms": 3.571,
+      "samples_ms": [
+        3.571,
+        3.782,
+        3.674
+      ],
+      "json_encode_best_ms": 3.081,
+      "json_bytes": 49340,
+      "returned_rows": 50
+    },
+    {
+      "name": "operations_purchases_50",
+      "best_ms": 2.898,
+      "samples_ms": [
+        3.102,
+        4.444,
+        2.898
+      ],
+      "json_encode_best_ms": 3.575,
+      "json_bytes": 37194,
+      "returned_rows": 50
+    },
+    {
+      "name": "procurement_paged",
+      "best_ms": 23.599,
+      "samples_ms": [
+        32.097,
+        23.599,
+        27.666
+      ],
+      "json_encode_best_ms": 4.704,
+      "json_bytes": 65166,
+      "returned_rows": {
+        "demand_page": 50,
+        "purchase_page": 50,
+        "links_page": 0
+      }
+    },
+    {
+      "name": "alerts_50",
+      "best_ms": 40.742,
+      "samples_ms": [
+        40.742,
+        44.976,
+        51.342
+      ],
+      "json_encode_best_ms": 1.66,
+      "json_bytes": 27814,
+      "returned_rows": 50
+    },
+    {
+      "name": "fulfillment_50_orders",
+      "best_ms": 5.101,
+      "samples_ms": [
+        5.429,
+        8.755,
+        5.101
+      ],
+      "json_encode_best_ms": 2.868,
+      "json_bytes": 42921,
+      "returned_rows": 50
+    },
+    {
+      "name": "inventory_counts_50_stock_skus",
+      "best_ms": 100.814,
+      "samples_ms": [
+        100.814,
+        113.682,
+        104.289
+      ],
+      "json_encode_best_ms": 1.095,
+      "json_bytes": 11673,
+      "returned_rows": 50
+    },
+    {
+      "name": "pricing_plans_compact_2x500_and_100_selectable_skus",
+      "best_ms": 337.026,
+      "samples_ms": [
+        337.026,
+        412.249,
+        412.261
+      ],
+      "json_encode_best_ms": 2.772,
+      "json_bytes": 42765,
+      "returned_rows": {
+        "plans": 2,
+        "selectable_skus": 100
+      }
+    },
+    {
+      "name": "pricing_plan_user_detail_500_skus",
+      "best_ms": 115.089,
+      "samples_ms": [
+        117.612,
+        129.008,
+        115.089
+      ],
+      "json_encode_best_ms": 21.239,
+      "json_bytes": 544408,
+      "returned_rows": 500
+    },
+    {
+      "name": "shipping_manifests_compact_100_package_manifest_and_50_orders",
+      "best_ms": 32.475,
+      "samples_ms": [
+        32.475,
+        32.939,
+        39.974
+      ],
+      "json_encode_best_ms": 2.054,
+      "json_bytes": 20644,
+      "returned_rows": {
+        "manifests": 1,
+        "orders": 50
+      }
+    },
+    {
+      "name": "shipping_manifest_user_detail_100_packages",
+      "best_ms": 22.177,
+      "samples_ms": [
+        27.254,
+        38.882,
+        22.177
+      ],
+      "json_encode_best_ms": 3.799,
+      "json_bytes": 67062,
+      "returned_rows": 100
+    },
+    {
+      "name": "ad_analytics_50_of_1000_records",
+      "best_ms": 49.112,
+      "samples_ms": [
+        66.854,
+        49.112,
+        51.319
+      ],
+      "json_encode_best_ms": 3.597,
+      "json_bytes": 30369,
+      "returned_rows": 50
+    },
+    {
+      "name": "ad_batch_user_detail_50_of_1000_rows",
+      "best_ms": 105.1,
+      "samples_ms": [
+        135.239,
+        105.1,
+        125.312
+      ],
+      "json_encode_best_ms": 7.062,
+      "json_bytes": 80489,
+      "returned_rows": 50
+    },
+    {
+      "name": "finance_full_state",
+      "best_ms": 239.165,
+      "samples_ms": [
+        294.837,
+        239.165,
+        261.497
+      ],
+      "json_encode_best_ms": 43.647,
+      "json_bytes": 652594,
+      "returned_rows": {
+        "entries": 300,
+        "payments": 0,
+        "orders": 1000
+      }
+    }
+  ],
+  "contracts": {
+    "catalog_groups": {
+      "pages": 100,
+      "page_size": 100,
+      "rows_verified": 10000,
+      "scan_ms": 13154.638
+    },
+    "batch_editor": {
+      "pages": 200,
+      "page_size": 50,
+      "rows_verified": 10000,
+      "scan_ms": 14379.289
+    },
+    "third_round_compact_states": {
+      "inventory_sku_page": 50,
+      "inventory_total": 10000,
+      "pricing_plans": 2,
+      "pricing_members_each": 500,
+      "pricing_list_omits_members": true,
+      "manifest_count": 1,
+      "manifest_packages": 100,
+      "manifest_list_omits_packages": true,
+      "shipped_order_total": 100,
+      "shipping_order_page": 50,
+      "ad_record_pages": 20,
+      "ad_unique_rows_verified": 1000,
+      "pricing_detail_explicit_get": 500,
+      "manifest_detail_explicit_get": 100,
+      "ad_batch_detail_page": 50
+    },
+    "delta_changes_between_pages": {
+      "unique_products_verified": 1001,
+      "pages": 3,
+      "latest_revisions_verified": true
+    }
+  },
+  "memory": {
+    "bootstrap_phase_current_bytes": 11405641,
+    "bootstrap_phase_peak_bytes": 21843028,
+    "bootstrap_phase_basis": "Python high-water mark through seeding and three paged server traversals, before any legacy full-catalog request; does not measure the browser cache.",
+    "tracemalloc_current_bytes": 16985291,
+    "tracemalloc_peak_bytes": 181221436,
+    "ru_maxrss_raw": 303736,
+    "ru_maxrss_unit": "KiB",
+    "basis": "tracemalloc covers Python allocations from startup through seed and checks, excluding SQLite/native allocations; ru_maxrss is the process lifetime OS resident-memory high-water mark, not per-endpoint usage."
+  },
+  "observed_design_limits": [
+    "Legacy default initial snapshot still returns all 10000 enriched products; opt-in paged bootstrap bounds every response at 500 and uses a delta handoff. Total product transfer still covers the full catalog before client rendering.",
+    "Finance.state still materializes all entries and all 1000 order contributions.",
+    "Paged responses bound transferred rows; their SQL counts/aggregate scans still depend on catalog/document size.",
+    "The 2 pricing plans each bind 500 SKU with unknown price/fee parameters and remain blocked local drafts; the manifest binds 100 actually reserved/shipped synthetic orders with one measured synthetic package each. Advertising covers 1000 matched-SKU campaign rows in one confirmed synthetic report batch, not financial income or actual ad spend.",
+    "Pricing and manifest list responses omit nested members/packages; state computations still hash current bound products/orders/stock and are measured separately from explicit user detail get.",
+    "Inventory counts state observes 10000 existing stock balances; this benchmark does not fabricate a physical count observation or apply stock counts.",
+    "This fixture has no images, platform history, real customer data, external API or model traffic."
+  ],
+  "external_connector_calls": 0,
+  "network_connect_calls": 0,
+  "elapsed_seconds": 67.186
+}

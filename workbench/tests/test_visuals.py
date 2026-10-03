@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from PIL import Image
+from visual_fixtures import output_image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from core import Store,Problem
 from media import Media
@@ -53,8 +54,10 @@ class VisualTests(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.store=Store(self.root/'data');self.media=Media(self.store);self.codex=CodexSubscription();self.v=Visuals(self.store,self.media,self.codex)
   self.kick=patch.object(self.v,'kick');self.kick.start()
   self.pid=self.store.import_rows([{'title_zh':'测试商品','facts':'黑色；5件；8cm','brand':'无品牌'}])['created'][0]
-  self.source=self.root/'source.png';Image.new('RGB',(1600,1600),'gray').save(self.source)
+  self.source=self.root/'source.png';output_image(self.source)
   self.a=self.media.ingest(self.source,'测试参考原图','测试自制素材',self.pid)
+  self.original_bytes=self.source.read_bytes()
+  output_image(self.source,color='black')
   self.binary=self.root/'codex';self.binary.write_text('#!'+sys.executable+'\n'+FAKE);self.binary.chmod(0o700)
   self.find=patch('codex_subscription.executable',return_value=str(self.binary));self.find.start()
   self.env=patch.dict(os.environ,{'NOON_VISUAL_FILE':str(self.source),'NOON_VISUAL_MODE':'ok','OPENAI_API_KEY':'must-not-be-used'});self.env.start()
@@ -77,7 +80,21 @@ class VisualTests(unittest.TestCase):
   with self.assertRaises(Problem):self.attach(j['asset_id'])
   with self.assertRaises(Problem):self.review(jid,checks={'identity':True})
   self.review(jid);p=self.attach(j['asset_id']);self.assertEqual(len(p['images']),1);self.assertFalse(p['images_verified'])
-  self.assertEqual(self.media.get(j['asset_id'])['parents'],[self.a['id']]);self.assertEqual(self.source.read_bytes(),(self.media.root/self.a['file']).read_bytes())
+  self.assertEqual(self.media.get(j['asset_id'])['parents'],[self.a['id']]);self.assertNotEqual(self.source.read_bytes(),(self.media.root/self.a['file']).read_bytes());self.assertEqual((self.media.root/self.a['file']).read_bytes(),self.original_bytes)
+ def test_identical_reference_return_preserves_receipt_but_blocks_use(self):
+  self.source.write_bytes(self.original_bytes);jid=self.job();self.v.drain();j=self.v.get(jid)
+  self.assertEqual(j['status'],'output_rejected');self.assertIn('完全相同',j['message']);self.assertTrue(j['dispatched_at']);self.assertFalse(self.v.state()['paused'])
+  with self.assertRaises(Problem):self.review(jid)
+  with self.assertRaises(Problem):self.attach(j['asset_id'])
+ def test_reencoded_reference_is_rejected_even_with_different_bytes(self):
+  with Image.open(io.BytesIO(self.original_bytes)) as image:image.save(self.source,format='JPEG',quality=92)
+  self.assertNotEqual(self.source.read_bytes(),self.original_bytes);jid=self.job();self.v.drain();j=self.v.get(jid)
+  self.assertEqual(j['status'],'output_rejected');self.assertIn('几乎相同',j['message'])
+  with self.assertRaises(Problem):self.review(jid)
+  with self.assertRaises(Problem):self.attach(j['asset_id'])
+ def test_nonwhite_hero_does_not_block_valid_scene(self):
+  Image.new('RGB',(1600,1600),'blue').save(self.source);ids=self.v.submit(self.request(shots=['hero','scene']))['job_ids'];self.v.drain()
+  self.assertEqual([self.v.get(i)['status'] for i in ids],['output_rejected','candidate']);self.assertIn('白底',self.v.get(ids[0])['message']);self.assertFalse(self.v.state()['paused']);self.assertEqual(self.store.get(self.pid)['images'],[])
  def test_image_capability_must_be_confirmed_before_dispatch(self):
   for mode in ('no_images','unknown_images'):
    jid=self.job(request_id=mode.replace('_','-'));self.v.control({'action':'resume'})
@@ -103,21 +120,21 @@ class VisualTests(unittest.TestCase):
   self.assertEqual(len(diagnostic_text('x'*3000)),1200)
  def test_low_resolution_output_preserved_and_cannot_be_approved(self):
   Image.new('RGB',(1254,1254),'red').save(self.source);jid=self.job();self.v.drain();j=self.v.get(jid)
-  self.assertEqual(j['status'],'output_rejected');a=self.media.get(j['asset_id']);self.assertEqual((self.media.root/a['file']).read_bytes(),self.source.read_bytes());self.assertTrue(self.v.state()['paused'])
+  self.assertEqual(j['status'],'output_rejected');a=self.media.get(j['asset_id']);self.assertEqual((self.media.root/a['file']).read_bytes(),self.source.read_bytes());self.assertFalse(self.v.state()['paused'])
   self.assertEqual(j['trace']['diagnostics']['output_width'],1254);self.assertEqual(j['trace']['diagnostics']['output_check'],'rejected')
   with self.assertRaises(Problem):self.review(jid)
   with self.assertRaises(Problem):self.attach(j['asset_id'])
   self.v.control({'action':'discard-output','id':jid});self.assertEqual(self.v.get(jid)['status'],'cancelled');self.assertTrue((self.media.root/a['file']).exists())
   with self.assertRaises(Problem):self.attach(j['asset_id'])
- def test_wrong_aspect_preserved_stops_remaining_batch(self):
+ def test_wrong_aspect_preserved_isolates_outputs_without_pausing(self):
   Image.new('RGB',(2400,1600),'red').save(self.source);jobs=self.v.submit(self.request(shots=['hero','scene']))['job_ids'];self.v.drain()
-  self.assertEqual(self.v.get(jobs[0])['status'],'output_rejected');self.assertEqual(self.v.get(jobs[1])['status'],'queued');self.assertIn('画幅',self.v.get(jobs[0])['message'])
+  self.assertEqual(self.v.get(jobs[0])['status'],'output_rejected');self.assertEqual(self.v.get(jobs[1])['status'],'output_rejected');self.assertFalse(self.v.state()['paused']);self.assertIn('画幅',self.v.get(jobs[0])['message'])
   with self.assertRaises(Problem):self.review(jobs[0])
  def test_large_image_protocol_not_truncated_at_two_megabytes(self):
   # Noise is a transport fixture, never a claimed product photograph.
   Image.frombytes('RGB',(1600,1600),os.urandom(1600*1600*3)).save(self.source)
   self.assertGreater(self.source.stat().st_size,2_000_000)
-  jid=self.job();self.v.drain();self.assertEqual(self.v.get(jid)['status'],'candidate')
+  jid=self.job(shots=['scene']);self.v.drain();self.assertEqual(self.v.get(jid)['status'],'candidate')
  def test_lost_response_no_automatic_retry_and_batch_paused(self):
   jobs=self.v.submit(self.request(shots=['hero','scene']))['job_ids']
   with patch.dict(os.environ,{'NOON_VISUAL_MODE':'exit'}):self.v.drain()
@@ -171,7 +188,7 @@ class VisualTests(unittest.TestCase):
   self.assertTrue(self.v.state()['paused'])
  def test_daily_cap_does_not_dispatch_more_images(self):
   jid=self.job()
-  with patch('visuals.DAILY_LIMIT',0),patch.object(self.codex,'session') as session:self.v.drain();session.assert_not_called()
+  with patch.object(self.v,'daily_limit',return_value=0),patch.object(self.codex,'session') as session:self.v.drain();session.assert_not_called()
   self.assertEqual(self.v.get(jid)['status'],'waiting');self.assertIsNone(self.v.get(jid)['dispatched_at']);self.assertIn('retry_at',self.v.get(jid)['trace'])
 
  def wait_until_due(self,jid):

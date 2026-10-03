@@ -21,7 +21,7 @@ class CatalogDeltaTests(unittest.TestCase):
   self.store.record_platform(self.pid,{'state':'pending'});change=self.store.catalog_snapshot(change['catalog_token']);self.assertEqual(change['product_changes'][0]['platform'],{'state':'pending'});self.assertEqual(change['product_changes'][0]['revision'],1)
  def test_expired_foreign_future_or_malformed_cursor_gives_full_snapshot(self):
   s=self.snapshot()
-  with patch('core.time.time',return_value=1800000015):self.assertIn('products',self.store.catalog_snapshot(s['catalog_token']))
+  with patch('core.time.time',return_value=1800086415):self.assertIn('products',self.store.catalog_snapshot(s['catalog_token']))
   for token in ['wrong',s['catalog_token'].replace(':1:',':999:'),'x'*200,self.store.catalog_session+':'+'9'*50+':120000000',Store(Path(self.tmp.name)).catalog_snapshot()['catalog_token']]:self.assertIn('products',self.store.catalog_snapshot(token))
  def test_rollback_does_not_advertise_uncommitted_changes(self):
   s=self.snapshot()
@@ -30,8 +30,16 @@ class CatalogDeltaTests(unittest.TestCase):
     c.execute('BEGIN IMMEDIATE');self.store.update(self.pid,{'stock':99},1,connection=c);raise RuntimeError('rollback')
   except RuntimeError:pass
   self.assertTrue(self.store.catalog_snapshot(s['catalog_token'])['catalog_unchanged']);self.assertIsNone(self.store.get(self.pid)['stock'])
- def test_large_change_set_uses_full_snapshot(self):
-  s=self.snapshot();self.store.import_rows([{'title_zh':f'Batch{i}'} for i in range(500)]);self.store.update(self.pid,{'stock':2},1);self.assertEqual(len(self.store.catalog_snapshot(s['catalog_token'])['products']),501)
+ def test_large_change_set_is_paged_without_losing_later_updates(self):
+  s=self.snapshot();ids=self.store.import_rows([{'title_zh':f'Batch{i}'} for i in range(500)])['created'];self.store.update(self.pid,{'stock':2},1)
+  first=self.store.catalog_snapshot(s['catalog_token']);self.assertNotIn('products',first);self.assertTrue(first['catalog_has_more']);self.assertEqual(len(first['product_changes']),500)
+  # A write while the client drains the backlog must also be delivered.
+  self.store.update(ids[0],{'stock':3},1);second=self.store.catalog_snapshot(first['catalog_token']);self.assertFalse(second['catalog_has_more']);self.assertNotIn('products',second)
+  changes={p['id']:p for p in first['product_changes']+second['product_changes']};self.assertEqual(len(changes),501);self.assertEqual(changes[self.pid]['stock'],2);self.assertEqual(changes[ids[0]]['stock'],3)
+  self.assertTrue(self.store.catalog_snapshot(second['catalog_token'])['catalog_unchanged'])
+ def test_time_bucket_refresh_keeps_unchanged_catalog_compact(self):
+  s=self.snapshot()
+  with patch('core.time.time',return_value=1800000015):self.assertTrue(self.store.catalog_snapshot(s['catalog_token'])['catalog_unchanged'])
  def test_product_event_for_missing_id_removes_client_record(self):
   s=self.snapshot()
   with self.store.connect() as c:

@@ -4,6 +4,26 @@ cd "$(dirname "$0")/.."
 PYTHON="${NOON_PYTHON:-.venv/bin/python}"
 "$PYTHON" scripts/doctor.py
 "$PYTHON" -m unittest discover -s workbench/tests -v
+"$PYTHON" -m unittest discover -s desktop/tests -v
 "$PYTHON" scripts/smoke.py
-for script in workbench/static/*.js; do node --check "$script"; done
+for script in workbench/static/*.js browser-extension/domestic-capture/*.js; do node --check "$script"; done
 node scripts/browser/smoke.cjs
+node scripts/browser/collection.cjs
+node scripts/browser/erp.cjs
+node scripts/browser/bank.cjs
+node scripts/browser/fulfillment.cjs
+node scripts/browser/after_sales.cjs
+node scripts/browser/procurement.cjs
+node scripts/browser/batch_edit.cjs
+node scripts/browser/alerts.cjs
+node scripts/browser/inventory_counts.cjs
+node scripts/browser/shipping_manifests.cjs
+node scripts/browser/pricing_plans.cjs
+node scripts/browser/ad_analytics.cjs
+node scripts/browser/import_profiles.cjs
+node scripts/browser/domestic_capture.cjs
+node scripts/browser/domestic_extension.cjs
+node scripts/browser/domestic_sources.cjs
+node scripts/browser/supplier_quotes.cjs
+node scripts/browser/fx_registry.cjs
+node scripts/browser/replenishment.cjs

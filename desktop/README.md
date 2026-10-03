@@ -1,6 +1,26 @@
-# Noon Studio for macOS · 0.38
+# Noon Studio for macOS
 
-最新开发构建为 `dist-v42/Noon Studio.app`，安装包 `dist/Noon-Studio-0.42.0-macOS-arm64.dmg`，备用 ZIP 同目录。本版包含页面大文件直投、链接候选池、图片模板及分镜要求、批量异常历史导出。按用户要求本轮暂不做功能测试；构建和签名结构检查不能代替业务运行验收。安装说明见 `INSTALL-0.42.0.md`。
+## 0.43.0：当前ERP版本的DMG构建入口
+
+当前源码含21个新增模块、40个导航页面，优先1688/淘宝/拼多多采集。0.43.0安装包**尚未在当前Linux环境生成**；下列脚本需要在Mac上运行，不能将历史0.42安装包作为新版交付。
+
+Mac需安装Python 3.12和Xcode命令行工具。仓库根目录运行：
+
+```sh
+./desktop/build_dmg.command
+```
+
+脚本安装锁定的运行依赖和PyInstaller，按本机架构构建内置Python/FFmpeg的程序；运行实际冻结后端的隔离业务/扩展/视频检查，通过后创建并只读挂载校验DMG，生成备用ZIP及SHA256。再次覆盖自己已有的同版本输出需明确传 `--overwrite`。
+输出目录：`desktop/dist/0.43.0/arm64/` 或 `desktop/dist/0.43.0/x86_64/`。正常Mac使用不需要安装Python；Python和Xcode仅用于构建。
+
+安装及升级说明见 [INSTALL-0.43.0.md](INSTALL-0.43.0.md)。本地开发包临时签名，未Apple公证；不会内置账号、浏览器会话或经营资料。
+
+仓库提供 `.github/workflows/macos-dmg.yml`，从选定代码分支触发macOS构建并上传安装包artifact，不发布GitHub Release。Runner实际架构由Python探测并记录；下载时核对架构。终端GitHub API访问被网络拒绝，但已连接的GitHub工具可访问仓库；正在通过独立构建分支执行该工作流，确切结果见根目录 docs/VERIFICATION.md。
+
+原有 `verify_bundle.py` 历史验收脚本保留；新增 `verify_release_bundle.py` 用于当前发布前检查。Linux打包编排测试不证明Mac编译、签名、WKWebView或DMG安装成功。
+
+
+历史0.42开发构建为 `dist-v42/Noon Studio.app`，安装包 `dist/Noon-Studio-0.42.0-macOS-arm64.dmg`，备用 ZIP 同目录。本版包含页面大文件直投、链接候选池、图片模板及分镜要求、批量异常历史导出。按用户要求本轮暂不做功能测试；构建和签名结构检查不能代替业务运行验收。安装说明见 `INSTALL-0.42.0.md`。
 
 0.37 历史测试版为 `dist-v37/Noon Studio.app`，压缩包 `dist/Noon-Studio-0.37.0-macOS-arm64.zip`。修复首页按钮绑定报错，以及批量铺货中编辑 AI 风格后点击视频开关失效的问题；后台刷新不会在表单编辑时重绘。Codex 独立审查与隔离浏览器操作记录见 `qa/independent-v36-review.md` 和 `qa/browser-v37.md`。真实 noon 店铺、原生 Mac 点击及长期运行仍未验证。
 
@@ -161,3 +181,7 @@ desktop/.venv/bin/python -m unittest discover -s workbench/tests -v
 页面直投 CSV/JSON 货源资料（5000 行、20MB），沿用已保存的投递箱规则，完整写入后才扫描，按500行处理。新商品与供货更新分开接收，同文件内容复用；接收回执不当作导入完成。包含链接候选池、图片模板复用、各类镜头独立要求、批量异常历史导出等近期代码。
 
 本轮按用户要求暂不做功能测试，只进行打包必需构建与安装文件检查。安装说明见 desktop/INSTALL-0.42.0.md（从工作台目录查看时使用 ../desktop/INSTALL-0.42.0.md）。真实平台及新功能运行状态仍待验证。
+
+2026-10-03 新增国内采集扩展的PyInstaller资源路径；冻结后端从包内固定五个文件生成ZIP，
+已用合成打包目录验证HTTP下载契约。Linux没有运行Xcode/Swift或PyInstaller macOS构建，
+这项源码修复不能视为新的原生安装包已经生成或签名验证。

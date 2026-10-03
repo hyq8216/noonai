@@ -131,7 +131,7 @@ class WorkflowTests(unittest.TestCase):
         app=App(self.tmp.name); p=self.complete(); p=self.store.approve(p['id'],p['revision'])
         jid=self.store.add_job(p['id'],'submit',p['revision'])
         contract={'attributes':[{'attribute_code':k,'is_mandatory':True,'is_localizable':True,'attribute_type':'ATTRIBUTE_TYPE_TEXT'} for k in ['product_title','long_description']]}
-        with patch('server.Noon') as client:
+        with patch.object(app,'config',return_value={**app.config(),'noon_ready':True,'submit_enabled':True}),patch('server.Noon') as client:
             client.return_value.attributes.return_value=contract
             client.return_value.submit.return_value={'sku_parent':'TEST-PARENT','status':{'status_id':3,'message':'invalid'}}
             app.run(jid,p,'submit')

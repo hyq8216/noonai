@@ -1,0 +1,34 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {runWorkflow}=require('./harness.cjs');
+runWorkflow('supplier quotes: local RFQ, unknown fields, currency partitions, source invalidation and CSV',async({page,call,navigate,settle,mobile})=>{
+ const imported=await call('/api/import',{products:[{title_zh:'合成本地询价商品',facts:'合成询价测试'}]});const pid=imported.created[0];
+ const suppliers=[];for(const name of ['合成国内甲','合成国内乙','合成国内丙'])suppliers.push(await call('/api/ops/entity',{kind:'supplier',name,request_id:crypto.randomUUID()}));
+ const before=(await call('/api/state')).products.find(p=>p.id===pid);
+ await navigate('supplier-quotes');
+ await page.locator(`[data-sq-add="${pid}"]`).click();
+ for(const s of suppliers)await page.locator(`[data-sq-supplier="${s.id}"]`).click();
+ await page.locator('#supplier-quote-form [name="name"]').fill('=合成本地询价');await page.locator(`[data-sq-member="${pid}"]`).fill('10');
+ const setQuote=async(i,values)=>{for(const [key,value] of Object.entries(values)){const el=page.locator(`[data-sq-quote="${i}"][data-field="${key}"]`);if(key==='currency')await el.selectOption(value);else await el.fill(value)}};
+ for(let i=0;i<3;i++)await setQuote(i,{currency:i===2?'USD':'CNY',unit_price:['10.1234','8','1'][i],min_quantity:'5',valid_until:'2099-01-01',lead_days:'0',evidence:'合成询价依据 '+i});
+ await page.locator('#supplier-quote-form [name="status"]').selectOption('checked');
+ const preview=async()=>{await page.locator('#supplier-quote-form button[type="submit"]').click();await page.locator('#supplier-quote-preview').waitFor();assert.equal(await page.locator('#sq-save').isDisabled(),true)};
+ await preview();assert.equal((await call('/api/supplier-quotes/state')).total,0);assert.match(await page.locator('#supplier-quote-preview').innerText(),/101\.2340/);
+ await page.locator('#sq-confirm').check();await page.locator('[data-sq-quote="0"][data-field="unit_price"]').fill('11');await page.locator('#supplier-quote-preview').waitFor({state:'detached'});
+ await setQuote(0,{unit_price:'10.1234'});await preview();assert.equal(await page.locator('#sq-confirm').isChecked(),false);await mobile();
+ const save=async()=>{await page.locator('#sq-confirm').check();await page.locator('#sq-save').click();await page.locator('#supplier-quote-preview').waitFor({state:'detached'});await settle()};
+ await save();let summary=(await call('/api/supplier-quotes/state')).rows[0];assert.equal(summary.precheck_current,true);assert.equal('quotes' in summary,false);
+ let p=await call('/api/supplier-quotes/get?id='+summary.id);assert.equal(p.comparison.length,2);assert.equal(p.supplier_order_sent,false);assert.equal(p.payment_made,false);assert.equal(p.audit.length,1);
+ const cny=p.comparison.find(g=>g.currency==='CNY');assert.equal(cny.rows[0].unit_price,'8');assert.equal(cny.rows.length,2);
+ assert.deepEqual((await call('/api/state')).products.find(p=>p.id===pid),before);
+ await page.setViewportSize({width:1440,height:1000});await navigate('products');await page.locator(`[data-open="${pid}"]`).first().click();await page.locator('#edit-form [name="facts"]').fill('合成修改商品事实');await page.locator('#edit-form button[type="submit"]').click();await settle();await page.waitForFunction(()=>!dirty);await navigate('supplier-quotes');
+ p=await call('/api/supplier-quotes/get?id='+p.id);assert.equal(p.review_required,true);assert.equal(p.precheck_current,false);assert.ok(p.comparison.every(g=>g.rows.length===0));
+ const details=page.locator(`[data-sq-expand="${p.id}"]`);await details.locator('summary').click();await page.locator(`[data-sq-edit="${p.id}"]`).click();await page.locator('#supplier-quote-form').waitFor();
+ // Incomplete supplier quote is retained as unknown, never converted to a zero price.
+ await setQuote(0,{unit_price:'',evidence:''});await preview();assert.match(await page.locator('#supplier-quote-preview').innerText(),/单价待确认/);await mobile();await save();
+ p=await call('/api/supplier-quotes/get?id='+p.id);assert.equal(p.revision,2);assert.equal(p.quotes[0].unit_price,null);assert.equal(p.review_required,false);assert.equal(p.precheck_current,false);
+ await page.locator(`[data-sq-expand="${p.id}"] summary`).click();await page.locator(`[data-sq-detail="${p.id}"] table`).waitFor();await mobile();
+ const download=page.waitForEvent('download');await page.locator('#sq-export').click();const file=await download;assert.equal(file.suggestedFilename(),'supplier-quotes.csv');const csv=fs.readFileSync(await file.path(),'utf8');assert.ok(csv.startsWith('\uFEFF'));assert.ok(csv.includes("'=合成本地询价"));assert.match(csv,/单价待确认/);
+ const f=page.locator(`[data-sq-cancel="${p.id}"]`);await f.locator('[name="reason"]').fill('合成撤销');await f.locator('[name="confirmed"]').check();await f.locator('[name="reason"]').fill('合成修订撤销');assert.equal(await f.locator('[name="confirmed"]').isChecked(),false);assert.equal(await f.locator('button').isDisabled(),true);await f.locator('[name="confirmed"]').check();await f.locator('button').click();await settle();
+ p=await call('/api/supplier-quotes/get?id='+p.id);assert.equal(p.status,'cancelled');assert.equal(p.revision,3);assert.equal(p.audit.length,3);assert.ok(p.comparison.every(g=>!g.rows.length));
+}).catch(e=>{console.error(e);process.exitCode=1});

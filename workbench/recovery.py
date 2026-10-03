@@ -23,39 +23,64 @@ MAX_EXPANDED=8*1024**3
 MAX_FILES=100000
 COMPONENTS=('workbench.sqlite3','workbench.sqlite3-wal','workbench.sqlite3-shm','assets','media','source-inbox')
 MIGRATION_INDEXES=('idx_automation_items_run_id','idx_products_partner_sku','idx_products_source_sku','idx_media_assets_product_kind','idx_ops_documents_kind_updated','idx_visual_jobs_status_created','idx_source_inbox_files_status_updated','idx_media_tasks_product_video','idx_media_tasks_active','idx_media_tasks_status_updated','idx_media_tasks_updated','idx_automation_items_product_id','idx_automation_items_status','idx_automation_items_runnable','idx_automation_runs_status_at','idx_jobs_visual_check_status_created','idx_jobs_visual_check_source','idx_jobs_status_updated','idx_jobs_updated')
-MIGRATION_INDEX_SQL='''
-CREATE INDEX IF NOT EXISTS idx_automation_items_run_id ON automation_items(run_id);
-CREATE INDEX IF NOT EXISTS idx_products_partner_sku ON products(json_extract(data,'$.partner_sku'));
-CREATE INDEX IF NOT EXISTS idx_products_source_sku ON products(json_extract(data,'$.source_sku'));
-CREATE INDEX IF NOT EXISTS idx_media_assets_product_kind ON media_assets(json_extract(data,'$.product_id'),json_extract(data,'$.kind'));
-CREATE INDEX IF NOT EXISTS idx_ops_documents_kind_updated ON ops_documents(kind,updated_at DESC,id DESC);
-CREATE INDEX IF NOT EXISTS idx_visual_jobs_status_created ON visual_jobs(status,created_at);
-CREATE INDEX IF NOT EXISTS idx_source_inbox_files_status_updated ON source_inbox_files(status,updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_media_tasks_product_video ON media_tasks(json_extract(recipe,'$.product_video.product_id'));
-CREATE INDEX IF NOT EXISTS idx_media_tasks_active ON media_tasks(status) WHERE status IN ('queued','running','cancelling');
-CREATE INDEX IF NOT EXISTS idx_media_tasks_status_updated ON media_tasks(status,updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_media_tasks_updated ON media_tasks(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_automation_items_product_id ON automation_items(product_id);
-CREATE INDEX IF NOT EXISTS idx_automation_items_status ON automation_items(status);
-CREATE INDEX IF NOT EXISTS idx_automation_items_runnable ON automation_items(updated_at) WHERE status IN ('queued','waiting','approval');
-CREATE INDEX IF NOT EXISTS idx_automation_runs_status_at ON automation_runs(status,run_at);
-CREATE INDEX IF NOT EXISTS idx_jobs_visual_check_status_created ON jobs(kind,status,created_at);
-CREATE INDEX IF NOT EXISTS idx_jobs_visual_check_source ON jobs(json_extract(result,'$.visual_job_id')) WHERE kind='visual-check';
-CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status,updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at DESC);
-'''
+
+def migration_schema_sql():
+    """Use the owning modules' definitions, including their default rows."""
+    from source_inbox import SCHEMA_SQL as INBOX_SQL
+    from models import TERMS_SCHEMA_SQL
+    from visuals import VISUAL_BUDGET_SQL
+    from visual_presets import SCHEMA_SQL as PRESET_SQL
+    from source_leads import SCHEMA_SQL as LEADS_SQL
+    from channel_accounts import ACCOUNT_SCHEMA_SQL
+    from source_collection import COLLECTION_SCHEMA_SQL
+    from order_intake import SCHEMA_SQL as ORDER_INTAKE_SQL
+    from domestic_capture import SCHEMA_SQL as DOMESTIC_CAPTURE_SQL
+    from inventory_counts import SCHEMA_SQL as INVENTORY_COUNTS_SQL
+    from shipping_manifests import SCHEMA_SQL as SHIPPING_MANIFESTS_SQL
+    from supplier_quotes import SCHEMA_SQL as SUPPLIER_QUOTES_SQL
+    from fx_registry import SCHEMA_SQL as FX_REGISTRY_SQL
+    from replenishment import SCHEMA_SQL as REPLENISHMENT_SQL
+    from pricing_plans import SCHEMA_SQL as PRICING_PLANS_SQL
+    from ad_analytics import SCHEMA_SQL as AD_ANALYTICS_SQL
+    from import_profiles import SCHEMA_SQL as IMPORT_PROFILES_SQL
+    from settlement_intake import SCHEMA_SQL as SETTLEMENT_SQL
+    from catalog_groups import SCHEMA_SQL as CATALOG_GROUP_SQL
+    from collection_schedules import SCHEMA_SQL as COLLECTION_SCHEDULE_SQL
+    from backup_schedules import SCHEMA_SQL as BACKUP_SCHEDULE_SQL
+    from bank_reconciliation import SCHEMA_SQL as BANK_SQL
+    from fulfillment import SCHEMA_SQL as FULFILLMENT_SQL
+    from procurement import SCHEMA_SQL as PROCUREMENT_SQL
+    from after_sales import SCHEMA_SQL as AFTER_SALES_SQL
+    from alerts import SCHEMA_SQL as ALERT_SQL
+    from batch_editor import SCHEMA_SQL as BATCH_EDITOR_SQL
+    return INBOX_SQL+TERMS_SCHEMA_SQL+VISUAL_BUDGET_SQL+PRESET_SQL+LEADS_SQL+ACCOUNT_SCHEMA_SQL+COLLECTION_SCHEMA_SQL+ORDER_INTAKE_SQL+SETTLEMENT_SQL+CATALOG_GROUP_SQL+COLLECTION_SCHEDULE_SQL+BACKUP_SCHEDULE_SQL+BANK_SQL+FULFILLMENT_SQL+PROCUREMENT_SQL+AFTER_SALES_SQL+ALERT_SQL+BATCH_EDITOR_SQL+INVENTORY_COUNTS_SQL+SHIPPING_MANIFESTS_SQL+PRICING_PLANS_SQL+AD_ANALYTICS_SQL+IMPORT_PROFILES_SQL+DOMESTIC_CAPTURE_SQL+SUPPLIER_QUOTES_SQL+FX_REGISTRY_SQL+REPLENISHMENT_SQL
 
 def compatible_legacy_schema(saved,expected):
     if not isinstance(saved,list) or any(not isinstance(row,list) or len(row)!=4 or not isinstance(row[1],str) for row in saved):return False
+    # Any combination of additive modules can be absent in an older archive.
+    # Present objects must still match exactly: this never accepts altered SQL.
+    with closing(sqlite3.connect(':memory:')) as c:
+        # The manifest module indexes the pre-existing movement ledger. Seed
+        # only that dependency from the exact expected definition; its table
+        # must never become an allowed additive migration object.
+        dependencies={'ops_movements'}
+        for kind,name,_table,sql in expected:
+            if kind=='table' and name in dependencies:c.execute(sql)
+        c.executescript(migration_schema_sql())
+        additive={row[1] for row in schema(c)}-dependencies
     present={row[1] for row in saved}
-    missing_indexes={name for name in MIGRATION_INDEXES if name not in present}
-    inbox_variants=[(),('source_inbox_config','source_inbox_files'),('source_inbox_video_config',),
-        ('source_inbox_visual_config','source_inbox_video_config'),
-        ('source_inbox_config','source_inbox_files','source_inbox_visual_config','source_inbox_video_config')]
-    return any(saved==[row for row in expected if row[1] not in missing_indexes.union(missing_inbox,missing_terms,missing_budget,missing_presets,missing_leads)]
-               for missing_inbox in inbox_variants for missing_terms in ((),('model_terms',))
-               for missing_budget in ((),('visual_budget',)) for missing_presets in ((),('visual_presets',))
-               for missing_leads in ((),('source_leads',)))
+    missing={row[1] for row in expected if row[1] not in present}
+    return missing.issubset(additive.union(MIGRATION_INDEXES)) and saved==[row for row in expected if row[1] not in missing]
+
+def migrate_database(path,expected):
+    with closing(sqlite3.connect(path)) as c:
+        c.executescript(migration_schema_sql())
+        present={row[1] for row in schema(c)}
+        # Reuse canonical SQL captured from this application's actual schema.
+        for kind,name,table,sql in expected:
+            if kind=='index' and name not in present and name in MIGRATION_INDEXES:
+                c.execute(sql)
+        c.commit()
 ASSET=re.compile(r'(assets|media)/[a-f0-9]{32}(?:-source|-preview)?\.(jpg|png|webp|mp4|webm)\Z')
 INBOX=re.compile(r'(?:source-inbox/(?:updates/)?[^/\\]{1,255}\.(?:csv|json)|source-inbox/photos/[A-Za-z0-9._-]{1,100}/(?:rights\.txt|references\.txt|[A-Za-z0-9._-]{1,250}\.(?:jpg|jpeg|png|webp))|source-inbox/videos/[A-Za-z0-9._-]{1,100}/(?:rights\.txt|[A-Za-z0-9._-]{1,250}\.(?:mp4|mov|webm)))\Z',re.IGNORECASE)
 
@@ -215,14 +240,7 @@ class Recovery:
                         with z.open(name) as src,path.open('wb') as dst:
                             for block in iter(lambda:src.read(1024*1024),b''):h.update(block);dst.write(block)
                         if h.hexdigest()!=entry['sha256']:raise Problem('备份校验失败：'+name)
-                    if migrate_schema:
-                        from source_inbox import SCHEMA_SQL
-                        from models import TERMS_SCHEMA_SQL
-                        from visuals import VISUAL_BUDGET_SQL
-                        from visual_presets import SCHEMA_SQL as VISUAL_PRESET_SQL
-                        from source_leads import SCHEMA_SQL as SOURCE_LEADS_SQL
-                        with closing(sqlite3.connect(target/'workbench.sqlite3')) as c:
-                            c.executescript(SCHEMA_SQL+TERMS_SCHEMA_SQL+VISUAL_BUDGET_SQL+VISUAL_PRESET_SQL+SOURCE_LEADS_SQL+MIGRATION_INDEX_SQL)
+                    if migrate_schema:migrate_database(target/'workbench.sqlite3',self.expected)
                     refs,counts=inspect_database(target/'workbench.sqlite3',self.expected)
                     if refs!={name for name in m['files'] if ASSET.fullmatch(name)}:raise Problem('素材引用与备份文件不一致')
                     if counts!=m['counts']:raise Problem('备份记录数量与清单不一致')
@@ -251,6 +269,9 @@ class Recovery:
                     c.execute('BEGIN IMMEDIATE')
                     for table,where in [('jobs',"status IN ('queued','running')"),('model_calls',"status='calling'"),('media_tasks',"status IN ('running','cancelling')"),('visual_jobs',"status IN ('preparing','generating')"),('automation_items',"status='processing'")]:
                         if c.execute(f'SELECT 1 FROM {table} WHERE {where} LIMIT 1').fetchone():raise Problem('仍有正在执行或等待执行的商品任务，请先完成或暂停后再安排恢复',409)
+                    if c.execute("SELECT 1 FROM sqlite_master WHERE name='source_collection_runs'").fetchone():
+                        if c.execute("SELECT 1 FROM source_collection_runs WHERE status='running' LIMIT 1").fetchone():raise Problem('仍有正在执行的来源采集，请先完成或取消后再安排恢复',409)
+                        c.execute("UPDATE source_collection_runs SET status='attention',message='已安排资料恢复，请核对后手动重建采集任务',updated_at=? WHERE status='queued'",(now(),))
                     c.execute('UPDATE media_control SET paused=1');c.execute('UPDATE visual_control SET paused=1')
                     c.execute("UPDATE automation_runs SET status='paused' WHERE status NOT IN ('done','cancelled')")
             pending={**preview,'id':key,'sha256':body['sha256'],'phase':'scheduled','scheduled_at':now(),'schema':self.expected}
@@ -275,6 +296,14 @@ class Recovery:
                 c.execute("UPDATE jobs SET status='paused',message='从备份恢复，请核对后恢复检查' WHERE kind='visual-check' AND status IN ('waiting_image','waiting','paused')")
                 c.execute("UPDATE products SET approved_revision=NULL")
                 if c.execute("SELECT 1 FROM sqlite_master WHERE name='source_inbox_config'").fetchone():c.execute('UPDATE source_inbox_config SET enabled=0')
+                if c.execute("SELECT 1 FROM sqlite_master WHERE name='collection_schedule_rules'").fetchone():
+                    c.execute("UPDATE collection_schedule_rules SET enabled=0,next_run=NULL,pause_reason='从备份恢复，请核对后重新启用',revision=revision+1")
+                if c.execute("SELECT 1 FROM sqlite_master WHERE name='backup_schedule_config'").fetchone():
+                    c.execute('UPDATE backup_schedule_config SET enabled=0,next_run_at=NULL,version=version+1')
+                if c.execute("SELECT 1 FROM sqlite_master WHERE name='source_channel_accounts'").fetchone():
+                    c.execute('UPDATE source_channel_accounts SET enabled=0,revision=revision+1,updated_at=?',(now(),))
+                if c.execute("SELECT 1 FROM sqlite_master WHERE name='source_collection_runs'").fetchone():
+                    c.execute("UPDATE source_collection_runs SET status='attention',message='从备份恢复，请核对来源账号和已有采集结果后手动重建任务',updated_at=? WHERE status IN ('queued','running')",(now(),))
                 for pid,data in c.execute('SELECT id,data FROM model_profiles').fetchall():
                     item=json.loads(data);item['enabled']=False
                     c.execute('UPDATE model_profiles SET data=?,revision=revision+1 WHERE id=?',(json.dumps(item,ensure_ascii=False),pid))
@@ -323,5 +352,5 @@ class Recovery:
                 write_json(self.result,{'status':'failed','finished_at':now(),'message':str(e) if isinstance(e,Problem) else '恢复检查未通过，原资料未替换；请检查磁盘空间和备份文件。'})
                 self.pending.unlink(missing_ok=True)
     def finish(self,p):
-        write_json(self.result,{'status':'restored','finished_at':now(),'source_created_at':p['created_at'],'rollback_archive_id':p['rollback_archive_id'],'message':'资料已恢复。自动化队列已暂停、模型服务已停用、商品上架审核已重置，请核对真实平台状态后再启用。'})
+        write_json(self.result,{'status':'restored','finished_at':now(),'source_created_at':p['created_at'],'rollback_archive_id':p['rollback_archive_id'],'message':'资料已恢复。自动化与来源采集已暂停、模型服务与来源账号已停用、商品上架审核已重置，请核对真实平台状态后再启用。'})
         self.pending.unlink(missing_ok=True)

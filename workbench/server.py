@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import threading
 import zipfile
 import fcntl
@@ -16,7 +17,7 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit, unquote, parse_qs
+from urllib.parse import urlsplit, unquote, parse_qs, quote
 from media import Media, MAX_UPLOAD
 from operations import Operations
 from models import Models
@@ -29,6 +30,29 @@ from image_host import ImageHost
 from visuals import Visuals
 from visual_presets import VisualPresets
 from source_leads import SourceLeads
+from channel_accounts import ChannelAccounts
+from source_collection import SourceCollection
+from order_intake import OrderIntake
+from domestic_capture import DomesticCapture
+from inventory_counts import InventoryCounts
+from shipping_manifests import ShippingManifests
+from supplier_quotes import SupplierQuotes
+from fx_registry import FXRegistry
+from replenishment import Replenishment
+from pricing_plans import PricingPlans
+from ad_analytics import AdAnalytics
+from import_profiles import ImportProfiles
+from settlement_intake import SettlementIntake
+from catalog_groups import CatalogGroups
+from analytics import Analytics
+from collection_schedules import CollectionSchedules
+from backup_schedules import BackupSchedules
+from bank_reconciliation import BankReconciliation
+from fulfillment import Fulfillment
+from procurement import Procurement
+from after_sales import AfterSales
+from alerts import Alerts
+from batch_editor import BatchEditor
 from finance import Finance
 from recovery import Recovery, MAX_ARCHIVE
 from core import Store, Problem, now, payload, normalize_image
@@ -88,8 +112,44 @@ class App:
         self.write_lock=threading.RLock()
         from source_inbox import SourceInbox
         self.source_inbox=SourceInbox(self)
+        self.channel_accounts=ChannelAccounts(self.store)
+        self.source_collection=SourceCollection(self)
+        self.collection_executor=ThreadPoolExecutor(max_workers=2,thread_name_prefix='source-collection')
+        self.collection_futures=set();self.collection_lock=threading.Lock()
+        self.supplier_quotes=SupplierQuotes(self)
+        self.fx_registry=FXRegistry(self)
+        self.replenishment=Replenishment(self)
+        self.import_profiles=ImportProfiles(self)
+        self.inventory_counts=InventoryCounts(self)
+        self.shipping_manifests=ShippingManifests(self)
+        self.pricing_plans=PricingPlans(self)
+        self.ad_analytics=AdAnalytics(self)
+        self.domestic_capture=DomesticCapture(self)
+        self.order_intake=OrderIntake(self)
+        self.settlements=SettlementIntake(self)
+        self.catalog_groups=CatalogGroups(self)
+        self.analytics=Analytics(self)
+        self.collection_schedules=CollectionSchedules(self)
+        self.backup_schedules=BackupSchedules(self)
+        self.bank_reconciliation=BankReconciliation(self)
+        self.fulfillment=Fulfillment(self)
+        self.procurement=Procurement(self)
+        self.after_sales=AfterSales(self)
+        self.alerts=Alerts(self)
+        self.batch_editor=BatchEditor(self)
         self.recovery=Recovery(self.store.root)
         self.image_host=ImageHost(self)
+    def dispatch_collection(self,result):
+        if result.get('status')=='queued' and not result.get('replayed'):
+            try:future=self.collection_executor.submit(self.source_collection.run,result['id'])
+            except RuntimeError:
+                with self.store.connect() as c:c.execute("UPDATE source_collection_runs SET status='attention',message='采集工作进程未启动，请明确重试' WHERE id=? AND status='queued'",(result['id'],))
+                raise Problem('采集工作进程未启动，任务已保留，请明确重试',409)
+            with self.collection_lock:self.collection_futures.add(future)
+            def finished(done):
+                with self.collection_lock:self.collection_futures.discard(done)
+            future.add_done_callback(finished)
+        return result
     def config(self):
         config=settings()
         if self.models.configured():
@@ -257,7 +317,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-        if filename: self.send_header('Content-Disposition',f'attachment; filename="{filename}"')
+        if filename:
+            safe_name=re.sub(r'[^A-Za-z0-9_.-]','_',filename)
+            self.send_header('Content-Disposition',f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{quote(filename,safe="")}')
         self.end_headers()
         if self.command!='HEAD':self.wfile.write(body)
     def safe_host(self):
@@ -355,6 +417,65 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self.safe_host(); path=urlsplit(self.path).path
+            query=parse_qs(urlsplit(self.path).query)
+            params={key:values[0] for key,values in query.items()}
+            if path=='/api/bank-reconciliation/state':return self.respond(self.app.bank_reconciliation.state(params.get('page','0'),params.get('entry_page','0')))
+            if path=='/api/bank-reconciliation/template':return self.respond(self.app.bank_reconciliation.template(),content_type='text/csv; charset=utf-8',filename='银行流水核对模板.csv')
+            if path=='/api/bank-reconciliation/export':return self.respond(self.app.bank_reconciliation.export(params.get('id')),content_type='text/csv; charset=utf-8',filename='银行流水核对.csv')
+            if path=='/api/fulfillment/state':return self.respond(self.app.fulfillment.state(params.get('page','0')))
+            if path=='/api/supplier-quotes/state':return self.respond(self.app.supplier_quotes.state(params.get('page','0'),params.get('query',''),params.get('product_page','0'),params.get('supplier_page','0')))
+            if path=='/api/supplier-quotes/get':return self.respond(self.app.supplier_quotes.get(params.get('id','')))
+            if path=='/api/supplier-quotes/export':return self.respond(self.app.supplier_quotes.export(),content_type='text/csv; charset=utf-8',filename='供应商报价比较.csv')
+            if path=='/api/fx-registry/state':return self.respond(self.app.fx_registry.state(params.get('page','0'),params.get('query','')))
+            if path=='/api/fx-registry/get':return self.respond(self.app.fx_registry.get(params.get('id',''),params.get('history_page','0')))
+            if path=='/api/fx-registry/export':return self.respond(self.app.fx_registry.export(),content_type='text/csv; charset=utf-8',filename='汇率档案.csv')
+            if path=='/api/replenishment/state':return self.respond(self.app.replenishment.state(params))
+            if path=='/api/replenishment/export':return self.respond(self.app.replenishment.export(params),content_type='text/csv; charset=utf-8',filename='库存补货建议.csv')
+            if path=='/api/domestic-capture/state':return self.respond(self.app.domestic_capture.state(params.get('page','0')))
+            if path=='/api/domestic-capture/extension':
+                buffer=io.BytesIO()
+                directory=BASE/'domestic-extension' if getattr(sys,'frozen',False) else BASE.parent/'browser-extension'/'domestic-capture'
+                with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as archive:
+                    for name in ('manifest.json','parser.js','popup.html','popup.css','popup.js'):
+                        source=directory/name
+                        if not source.is_file() or source.is_symlink():raise Problem('采集扩展源码缺失，请核对软件安装',503)
+                        archive.writestr('noon-domestic-capture/'+name,source.read_bytes())
+                return self.respond(buffer.getvalue(),content_type='application/zip',filename='国内商品采集扩展.zip')
+            if path=='/api/inventory-counts/state':return self.respond(self.app.inventory_counts.state(params.get('page','0'),params.get('warehouse_id',''),params.get('query','')))
+            if path=='/api/inventory-counts/template':return self.respond(self.app.inventory_counts.template(params.get('warehouse_id',''),params.get('query',''),params.get('page','0')),content_type='text/csv; charset=utf-8',filename='库存实盘模板.csv')
+            if path=='/api/inventory-counts/export':return self.respond(self.app.inventory_counts.export(params.get('document_id','')),content_type='text/csv; charset=utf-8',filename='库存盘点单.csv')
+            if path=='/api/shipping-manifests/get':return self.respond(self.app.shipping_manifests.get(params.get('id','')))
+            if path=='/api/shipping-manifests/state':return self.respond(self.app.shipping_manifests.state(params.get('page','0'),params.get('query',''),params.get('order_page','0')))
+            if path=='/api/shipping-manifests/export':return self.respond(self.app.shipping_manifests.export(params.get('id',''),params.get('kind','packages')),content_type='text/csv; charset=utf-8',filename='物流包装清单.csv')
+            if path=='/api/pricing-plans/get':return self.respond(self.app.pricing_plans.get(params.get('id','')))
+            if path=='/api/pricing-plans/state':return self.respond(self.app.pricing_plans.state(params.get('page','0'),params.get('query',''),params.get('product_page','0')))
+            if path=='/api/pricing-plans/export':return self.respond(self.app.pricing_plans.export(),content_type='text/csv; charset=utf-8',filename='本地价格方案.csv')
+            if path=='/api/ad-analytics/state':return self.respond(self.app.ad_analytics.state(params))
+            if path=='/api/ad-analytics/template':return self.respond(self.app.ad_analytics.template(params),content_type='text/csv; charset=utf-8',filename='广告归因模板.csv')
+            if path=='/api/ad-analytics/export':return self.respond(self.app.ad_analytics.export(params),content_type='text/csv; charset=utf-8',filename='广告归因分析.csv')
+            if path=='/api/import-profiles/state':return self.respond(self.app.import_profiles.state(params.get('page','0')))
+            if path=='/api/import-profiles/schema':return self.respond(self.app.import_profiles.schema())
+            if path=='/api/fulfillment/export':return self.respond(self.app.fulfillment.export(params.get('id')),content_type='text/csv; charset=utf-8',filename='波次拣货单.csv')
+            if path=='/api/procurement/state':return self.respond(self.app.procurement.state(params))
+            if path=='/api/procurement/export':return self.respond(self.app.procurement.export(params),content_type='text/csv; charset=utf-8',filename='采购订单关联.csv')
+            if path=='/api/after-sales/state':return self.respond(self.app.after_sales.state(params.get('page','0'),params.get('query',''),params.get('order_page','0')))
+            if path=='/api/after-sales/export':return self.respond(self.app.after_sales.export(),content_type='text/csv; charset=utf-8',filename='售后核对.csv')
+            if path=='/api/alerts/state':return self.respond(self.app.alerts.state(params.get('page','0'),params.get('group','all')))
+            if path=='/api/batch-editor/state':return self.respond(self.app.batch_editor.state(params.get('page','0'),params.get('query',''),params.get('group','all')))
+            if path=='/api/order-intake/state':return self.respond(self.app.order_intake.state(params.get('page','0')))
+            if path=='/api/order-intake/template':return self.respond(self.app.order_intake.template().encode('utf-8'),content_type='text/csv; charset=utf-8',filename='订单导入模板.csv')
+            if path=='/api/settlements/state':return self.respond(self.app.settlements.state(params.get('page','0')))
+            if path=='/api/settlements/template':return self.respond(self.app.settlements.template(),content_type='text/csv; charset=utf-8',filename='结算核对模板.csv')
+            if path=='/api/settlements/export':return self.respond(self.app.settlements.export(params.get('id')),content_type='text/csv; charset=utf-8',filename='结算核对.csv')
+            if path=='/api/catalog-groups/state':return self.respond(self.app.catalog_groups.state(params.get('page','0'),params.get('query',''),params.get('product_page','0')))
+            if path=='/api/analytics/state':return self.respond(self.app.analytics.state(params))
+            if path=='/api/analytics/export':return self.respond(self.app.analytics.export(params),content_type='text/csv; charset=utf-8',filename='运营分析.csv')
+            if path=='/api/collection-schedules/state':return self.respond(self.app.collection_schedules.state(params.get('page','0')))
+            if path=='/api/backup-schedules/state':return self.respond(self.app.backup_schedules.state())
+            if path=='/api/channels/state':return self.respond(self.app.channel_accounts.state())
+            if path=='/api/collection/state':
+                query=parse_qs(urlsplit(self.path).query)
+                return self.respond(self.app.source_collection.state(query.get('page',['0'])[0],query.get('run_page',['0'])[0]))
             if path=='/api/platform-batch/status':
                 return self.respond(PlatformBatch(self.app,parse_qs(urlsplit(self.path).query).get('kind',['refresh'])[0]).status(parse_qs(urlsplit(self.path).query).get('request_id',[''])[0]))
             if path=='/api/content-submit-batch/status':
@@ -405,11 +526,12 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/state':
                 query=parse_qs(urlsplit(self.path).query)
                 surface=query.get('surface',[''])[0]
+                channels_state={'channels':self.app.channel_accounts.state(),'source_collection':self.app.source_collection.state()} if surface=='channels' else {}
                 ops_views={'overview','orders','purchases','inventory','warehouse','partners','finance'}
-                return self.respond({**self.app.store.catalog_snapshot(query.get('catalog_token',[None])[0]),**self.app.store.history(False),'ops':self.app.ops.state(surface,query.get('ops_page',['0'])[0]) if surface in ops_views else None,'finance':self.app.finance.state() if surface=='finance' else None,'media':self.app.media.state(False,surface=='batch',False),'visuals':self.app.visuals.state(False),'visual_presets':self.app.visual_presets.list() if surface in ('batch','import') else [],'visual_checks':self.app.visual_checks.state(include_detail=False),'models':self.app.models.state(),'source_inbox':self.app.source_inbox.state(False),'recovery':self.app.recovery.state(),'image_host':self.app.image_host.state(),'image_host_batch':self.app.image_host.status(),'platform_batch_latest':PlatformBatch(self.app).latest(),'content_submit_batch_latest':ContentSubmitBatch(self.app).latest(),'catalog_campaign_latest':self.app.catalog_campaign.latest(),'automation':self.app.automation.state(query.get('auto_page',['0'])[0],query.get('auto_group',['all'])[0],query.get('auto_query',[''])[0],query.get('auto_item_pages',['{}'])[0],surface=='automation',surface=='batch'),'config':{**self.app.config(),'data_location':str(self.app.store.root)},'token':self.app.token})
+                return self.respond({**channels_state,**self.app.store.catalog_snapshot(query.get('catalog_token',[None])[0],paged=query.get('catalog_paged',['0'])[0]=='1'),**self.app.store.history(False),'ops':self.app.ops.state(surface,query.get('ops_page',['0'])[0]) if surface in ops_views else None,'finance':self.app.finance.state() if surface=='finance' else None,'media':self.app.media.state(False,surface=='batch',False),'visuals':self.app.visuals.state(False),'visual_presets':self.app.visual_presets.list() if surface in ('batch','import') else [],'visual_checks':self.app.visual_checks.state(include_detail=False),'models':self.app.models.state(),'source_inbox':self.app.source_inbox.state(False),'recovery':self.app.recovery.state(),'image_host':self.app.image_host.state(),'image_host_batch':self.app.image_host.status(),'platform_batch_latest':PlatformBatch(self.app).latest(),'content_submit_batch_latest':ContentSubmitBatch(self.app).latest(),'catalog_campaign_latest':self.app.catalog_campaign.latest(),'automation':self.app.automation.state(query.get('auto_page',['0'])[0],query.get('auto_group',['all'])[0],query.get('auto_query',[''])[0],query.get('auto_item_pages',['{}'])[0],surface=='automation',surface=='batch'),'config':{**self.app.config(),'data_location':str(self.app.store.root)},'token':self.app.token})
             if path=='/api/catalog/snapshot':
                 query=parse_qs(urlsplit(self.path).query)
-                return self.respond(self.app.store.catalog_snapshot(query.get('catalog_token',[None])[0]))
+                return self.respond(self.app.store.catalog_snapshot(query.get('catalog_token',[None])[0],paged=query.get('catalog_paged',['0'])[0]=='1'))
             if path.startswith('/api/backup/download/'):
                 key=path.removeprefix('/api/backup/download/')
                 return self.serve_media(self.app.recovery.archive_path(key),'Noon-Studio-backup-'+key+'.zip')
@@ -422,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(r'[a-f0-9]{32}(?:-source)?\.(jpg|png|webp)',name): raise Problem('图片不存在',404)
                 file=self.app.store.assets/name
             else:
-                name={'/':'index.html','/platform.js':'platform.js','/content_submit_batch.js':'content_submit_batch.js','/catalog.js':'catalog.js','/video_batch.js':'video_batch.js','/source_import.js':'source_import.js','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/operations.js':'operations.js','/media.js':'media.js','/media_import.js':'media_import.js','/automation.js':'automation.js','/visuals.js':'visuals.js','/visual_checks.js':'visual_checks.js','/finance.js':'finance.js','/warehouse.js':'warehouse.js','/stock_plan.js':'stock_plan.js','/recovery.js':'recovery.js','/image_host.js':'image_host.js','/workflow_visual.js':'workflow_visual.js','/approval_batch.js':'approval_batch.js','/batch.js':'batch.js','/category.js':'category.js','/category_batch.js':'category_batch.js','/visual_batch.js':'visual_batch.js'}.get(path)
+                name={'/':'index.html','/supplier_quotes.js':'supplier_quotes.js','/fx_registry.js':'fx_registry.js','/replenishment.js':'replenishment.js','/domestic_capture.js':'domestic_capture.js','/inventory_counts.js':'inventory_counts.js','/shipping_manifests.js':'shipping_manifests.js','/pricing_plans.js':'pricing_plans.js','/ad_analytics.js':'ad_analytics.js','/import_profiles.js':'import_profiles.js','/bank_reconciliation.js':'bank_reconciliation.js','/fulfillment.js':'fulfillment.js','/procurement.js':'procurement.js','/after_sales.js':'after_sales.js','/alerts.js':'alerts.js','/batch_editor.js':'batch_editor.js','/order_intake.js':'order_intake.js','/settlement_intake.js':'settlement_intake.js','/catalog_groups.js':'catalog_groups.js','/analytics.js':'analytics.js','/collection_schedules.js':'collection_schedules.js','/backup_schedules.js':'backup_schedules.js','/channels.js':'channels.js','/platform.js':'platform.js','/content_submit_batch.js':'content_submit_batch.js','/catalog.js':'catalog.js','/video_batch.js':'video_batch.js','/source_import.js':'source_import.js','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/operations.js':'operations.js','/media.js':'media.js','/media_import.js':'media_import.js','/automation.js':'automation.js','/visuals.js':'visuals.js','/visual_checks.js':'visual_checks.js','/finance.js':'finance.js','/warehouse.js':'warehouse.js','/stock_plan.js':'stock_plan.js','/recovery.js':'recovery.js','/image_host.js':'image_host.js','/workflow_visual.js':'workflow_visual.js','/approval_batch.js':'approval_batch.js','/batch.js':'batch.js','/category.js':'category.js','/category_batch.js':'category_batch.js','/visual_batch.js':'visual_batch.js'}.get(path)
                 if not name: raise Problem('页面不存在',404)
                 file=BASE/'static'/name
             if not file.is_file(): raise Problem('文件不存在',404)
@@ -442,6 +564,66 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/media/bulk-upload':return self.upload_media(bulk=True)
             if path=='/api/source-inbox/upload':return self.upload_catalog()
             b=self.body()
+            extension_actions={
+                '/api/supplier-quotes/preview':self.app.supplier_quotes.preview,
+                '/api/supplier-quotes/save':self.app.supplier_quotes.save,
+                '/api/supplier-quotes/cancel':self.app.supplier_quotes.cancel,
+                '/api/fx-registry/preview':self.app.fx_registry.preview,
+                '/api/fx-registry/save':self.app.fx_registry.save,
+                '/api/fx-registry/cancel':self.app.fx_registry.cancel,
+                '/api/fx-registry/convert':self.app.fx_registry.convert,
+                '/api/replenishment/preview':self.app.replenishment.preview,
+                '/api/replenishment/apply':self.app.replenishment.apply,
+                '/api/domestic-capture/preview':self.app.domestic_capture.preview,
+                '/api/domestic-capture/apply':self.app.domestic_capture.apply,
+                '/api/inventory-counts/preview':self.app.inventory_counts.preview,
+                '/api/inventory-counts/apply':self.app.inventory_counts.apply,
+                '/api/shipping-manifests/preview':self.app.shipping_manifests.preview,
+                '/api/shipping-manifests/apply':self.app.shipping_manifests.apply,
+                '/api/shipping-manifests/handoff':self.app.shipping_manifests.handoff,
+                '/api/pricing-plans/preview':self.app.pricing_plans.preview,
+                '/api/pricing-plans/save':self.app.pricing_plans.save,
+                '/api/pricing-plans/cancel':self.app.pricing_plans.cancel,
+                '/api/ad-analytics/preview':self.app.ad_analytics.preview,
+                '/api/ad-analytics/apply':self.app.ad_analytics.apply,
+                '/api/import-profiles/save':self.app.import_profiles.save,
+                '/api/import-profiles/remove':self.app.import_profiles.remove,
+                '/api/bank-reconciliation/preview':self.app.bank_reconciliation.preview,
+                '/api/bank-reconciliation/import':self.app.bank_reconciliation.import_rows,
+                '/api/bank-reconciliation/match':self.app.bank_reconciliation.match,
+                '/api/fulfillment/preview':self.app.fulfillment.preview,
+                '/api/fulfillment/apply':self.app.fulfillment.apply,
+                '/api/procurement/preview':self.app.procurement.preview,
+                '/api/procurement/apply':self.app.procurement.apply,
+                '/api/procurement/unlink':self.app.procurement.unlink,
+                '/api/after-sales/preview':self.app.after_sales.preview,
+                '/api/after-sales/create':self.app.after_sales.create,
+                '/api/after-sales/receive':self.app.after_sales.receive,
+                '/api/after-sales/refund':self.app.after_sales.refund,
+                '/api/after-sales/dispose':self.app.after_sales.dispose,
+                '/api/alerts/action':self.app.alerts.action,
+                '/api/batch-editor/preview':self.app.batch_editor.preview,
+                '/api/batch-editor/apply':self.app.batch_editor.apply,
+                '/api/order-intake/preview':self.app.order_intake.preview,
+                '/api/order-intake/apply':self.app.order_intake.apply,
+                '/api/settlements/preview':self.app.settlements.preview,
+                '/api/settlements/apply':self.app.settlements.apply,
+                '/api/catalog-groups/preview':self.app.catalog_groups.preview,
+                '/api/catalog-groups/save':self.app.catalog_groups.save,
+                '/api/catalog-groups/remove':self.app.catalog_groups.remove,
+                '/api/collection-schedules/save':self.app.collection_schedules.save,
+                '/api/collection-schedules/control':self.app.collection_schedules.control,
+                '/api/backup-schedules/save':self.app.backup_schedules.save,
+                '/api/backup-schedules/run':self.app.backup_schedules.run,
+            }
+            if path in extension_actions:return self.respond(extension_actions[path](b))
+            if path=='/api/channels/save':return self.respond(self.app.channel_accounts.save(b))
+            if path=='/api/channels/remove':return self.respond(self.app.channel_accounts.remove(b))
+            if path=='/api/collection/create':return self.respond(self.app.dispatch_collection(self.app.source_collection.create(b)),202)
+            if path=='/api/collection/control':return self.respond(self.app.dispatch_collection(self.app.source_collection.control(b)))
+            if path=='/api/collection/preview':return self.respond(self.app.source_collection.preview(b))
+            if path=='/api/collection/apply':return self.respond(self.app.source_collection.apply(b))
+            if path=='/api/collection/resolve':return self.respond(self.app.source_collection.resolve(b))
             if path.startswith('/api/image-host/'):
                 action=path.removeprefix('/api/image-host/')
                 if action not in ('save','preview','apply','cancel'):raise Problem('操作不存在',404)
@@ -453,7 +635,11 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/source-leads/preview':return self.respond(self.app.source_leads.preview(b))
             if path=='/api/source-leads/add':return self.respond(self.app.source_leads.add(b))
             if path=='/api/backup/create':return self.respond(self.app.recovery.create())
-            if path=='/api/backup/schedule':return self.respond(self.app.recovery.schedule(b))
+            if path=='/api/backup/schedule':
+                with self.app.collection_lock:
+                    if self.app.collection_futures:raise Problem('采集仍有读取请求未结束，请等待完成后安排恢复',409)
+                    if self.app.backup_schedules.inflight:raise Problem('周期备份仍在执行，请等待完成后安排恢复',409)
+                    return self.respond(self.app.recovery.schedule(b))
             if path=='/api/backup/cancel':return self.respond(self.app.recovery.cancel())
             if path=='/api/finance/export':return self.respond(self.app.finance.csv(),content_type='text/csv; charset=utf-8',filename='noon-finance.csv')
             if path.startswith('/api/finance/'):return self.respond(self.app.finance.transact(path.removeprefix('/api/finance/'),b))
@@ -576,9 +762,10 @@ def start(root,port,ready_file=None):
         target=Path(ready_file); target.write_text(json.dumps({'url':f'http://127.0.0.1:{server.server_port}','pid':os.getpid()})); target.chmod(0o600)
     def stop(signum,frame):raise KeyboardInterrupt
     signal.signal(signal.SIGTERM,stop)
+    app.collection_schedules.start();app.backup_schedules.start()
     try: server.serve_forever()
     except KeyboardInterrupt: pass
-    finally: server.server_close(); app.source_inbox.close(); app.models.codex.close(); app.visual_checks.close(); app.visuals.close(); app.automation.close(); app.media.close(); app.executor.shutdown(wait=False,cancel_futures=True)
+    finally: server.server_close(); app.collection_schedules.close(); app.backup_schedules.close(); app.collection_executor.shutdown(wait=False,cancel_futures=True); app.source_inbox.close(); app.models.codex.close(); app.visual_checks.close(); app.visuals.close(); app.automation.close(); app.media.close(); app.executor.shutdown(wait=False,cancel_futures=True)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8791); parser.add_argument('--data',default=str(BASE/'data'))

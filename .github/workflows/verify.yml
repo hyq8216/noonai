@@ -35,6 +35,8 @@ jobs:
           mkdir -p artifacts
           set -o pipefail
           python -m unittest discover -s workbench/tests -v 2>&1 | tee artifacts/backend-tests.log
+      - name: Desktop packaging orchestration
+        run: python -m unittest discover -s desktop/tests -v
       - name: Isolated startup and restart
         if: ${{ !cancelled() }}
         run: python scripts/smoke.py
@@ -61,8 +63,23 @@ jobs:
       - run: npm ci --prefix scripts/browser
       - run: npx --prefix scripts/browser playwright install --with-deps chromium
       - name: JavaScript syntax
-        run: for script in workbench/static/*.js; do node --check "$script"; done
+        run: for script in workbench/static/*.js browser-extension/domestic-capture/*.js; do node --check "$script"; done
       - name: Real Chromium smoke
         env:
           NOON_PYTHON: python
         run: node scripts/browser/smoke.cjs
+      - name: Synthetic multichannel browser workflow
+        env:
+          NOON_PYTHON: python
+        run: node scripts/browser/collection.cjs
+      - name: Local ERP business workflow
+        env:
+          NOON_PYTHON: python
+        run: node scripts/browser/erp.cjs
+      - name: Warehouse, finance, returns and exception workflows
+        env:
+          NOON_PYTHON: python
+        run: |
+          for workflow in bank fulfillment after_sales procurement batch_edit alerts inventory_counts shipping_manifests pricing_plans ad_analytics import_profiles domestic_capture domestic_extension domestic_sources supplier_quotes fx_registry replenishment; do
+            node "scripts/browser/${workflow}.cjs"
+          done

@@ -6,7 +6,7 @@ class WorkflowHostTests(unittest.TestCase):
  setUp=fixtures.ImageHostTests.setUp
  tearDown=fixtures.ImageHostTests.tearDown
  def begin(self):
-  p=self.s.get(self.pid);self.s.update(self.pid,{'source_url':'https://detail.1688.com/offer/1.html','supplier':'QA'},p['revision']);self.a=self.app.automation
+  p=self.s.get(self.pid);verified=p['images_verified'];self.s.update(self.pid,{'source_url':'https://detail.1688.com/offer/1.html','supplier':'QA'},p['revision']);p=self.s.get(self.pid);self.s.update(self.pid,{'images_verified':verified},p['revision']);self.a=self.app.automation
   b={'product_ids':[self.pid],'name':'自动托管','request_id':'host-flow','plan':{'image_host':True}}
   pre=self.a.preflight(b);self.assertEqual(pre['eligible_ids'],[self.pid]);self.r=self.a.create({**b,'preflight_token':pre['token']});self.a.tick();return b
  def item(self):return self.a.state()['items'][0]

@@ -88,7 +88,7 @@ class ModelsTests(unittest.TestCase):
 
 class AutomationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.app=App(self.tmp.name);self.store=self.app.store;self.auto=self.app.automation;self.app.media.start()
+        self.tmp=tempfile.TemporaryDirectory();self.app=App(self.tmp.name);self.store=self.app.store;self.auto=self.app.automation;self.app.media.start();__import__('workflow_clock').install_clock(self.app.automation)
     def tearDown(self):
         self.auto.close();self.app.media.close();self.app.executor.shutdown(wait=True);self.tmp.cleanup()
     def product(self,**extra):
@@ -143,7 +143,7 @@ class AutomationTests(unittest.TestCase):
         self.auto.control({'action':'pause','run_id':rid});self.tick();self.assertEqual(self.item(rid)['step'],0)
         self.auto.control({'action':'resume','run_id':rid});self.tick();self.assertEqual(self.item(rid)['step'],1)
     def test_missing_source_isolated_and_current_revision_retry(self):
-        bad=self.product(facts='');good=self.product();rid=self.auto.create({'request_id':'batch','name':'Batch','product_ids':[bad['id'],good['id']]})['id'];self.tick()
+        bad=self.product();good=self.product();rid=self.auto.create({'request_id':'batch','name':'Batch','product_ids':[bad['id'],good['id']]})['id'];bad=self.store.update(bad['id'],{'facts':''},bad['revision']);self.tick()
         items=self.auto.state()['items'];b=next(i for i in items if i['product_id']==bad['id']);g=next(i for i in items if i['product_id']==good['id'])
         self.assertEqual(b['status'],'attention');self.assertEqual(g['step'],1)
         fixed=self.store.update(bad['id'],{'facts':'5 pieces'},bad['revision'])
@@ -202,11 +202,14 @@ class AutomationTests(unittest.TestCase):
         rid=self.create(p);self.tick(3);self.assertEqual(self.item(rid)['status'],'approval');self.assertFalse(self.store.get(p['id'])['reviewed'])
         self.store.approve(p['id'],p['revision']);self.tick(2);self.assertEqual(self.item(rid)['status'],'done')
     def test_cancel_inflight_does_not_reactivate_and_submit_never_retries(self):
-        self.model();p=self.product();rid=self.create(p,{'translate':True,'submit':True});self.tick()
+        self.model();p=self.product();rid=self.create(p,{'translate':True});self.tick()
         def cancelled(*args):self.auto.control({'action':'cancel_run','run_id':rid});return response()
         with patch('models.request_json',side_effect=cancelled):self.tick()
         self.assertEqual(self.item(rid)['status'],'cancelled')
-        with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',step=4 WHERE run_id=?",(rid,))
+        with self.store.connect() as c:
+            plan=json.loads(c.execute('SELECT plan FROM automation_runs WHERE id=?',(rid,)).fetchone()[0]);plan['steps'].insert(-1,'submit');plan['submit']=True
+            c.execute('UPDATE automation_runs SET plan=? WHERE id=?',(json.dumps(plan),rid))
+            c.execute("UPDATE automation_items SET status='attention',step=4 WHERE run_id=?",(rid,))
         i=self.item(rid)
         with self.assertRaises(Problem):self.auto.control({'action':'retry','item_id':i['id'],'revision':self.store.get(p['id'])['revision']})
 
