@@ -97,3 +97,16 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
   ready.json 实际端口 HTTP 200、独立启动/重启及六页浏览器检查全部通过。
 - 373 tests in 58.217s，24 failures / 16 errors，40项失败名称与修复分支相同。
 - 账号内联安装和启动技能草稿已保存；环境发布需以账号界面独立回读为准。
+
+账号环境发布与恢复回读：
+- noonai 新云端 发布页显示 Environment published / Published；
+  设置列表独立显示 Private，无 Unpublished 标记。旧 noonai Unpublished 仍存在。
+- 发布后新建编辑草稿容器，会话 01a10043-6668-7316-a261-a7388adc403f，
+  检出 main 6d2276e，env -i / 不加载 profile 后显式恢复路径和缓存。
+  Python 3.12.14 / Node 22.23.3 / arabic_layout=true / Chromium 145.0.7632.6；
+  ready.json 端口 43623 HTTP 200、独立服务/重启 smoke 与六页 browser smoke 退出 0。
+  tracked / staged diff 为 0；未重新跑全量回归，333/40 的边界保持。
+- 极简 PATH 需显式加入镜像 Python runtime bin 才能使用 python3.12 全局命令；
+  .venv/bin/python 与保存的 Node 缓存入口独立可用，不依赖上一会话 exports。
+- 新草稿仅验收，不改变或发布配置；临时数据已清理，无运行中验收服务。
+  原生桌面任务选择器仍未独立验收，不能把设置列表当作选择器证明。
