@@ -53,3 +53,13 @@ setup和CI安装Noto CJK与DejaVu。后续CI结果必须独立回读。
 
 本机新建PyPI运行环境的Pillow未提供RAQM；诊断明确记录arabic_layout=false，
 英文/中文模板通过。阿文模板沿用阻止错误排版的门禁，不能据此声称本机阿文图片已可用。
+
+## 最新Linux回读（代码提交6ff24d1）
+
+https://github.com/hyq8216/noonai/actions/runs/37092258230
+
+- Linux中/英/阿文字绘制诊断成功，arabic_layout=true；字体兼容缺陷已消除。
+- 373 tests，24 failures、16 errors，与本地同为333通过、40项待修复。
+- 实际启动、调度器、写保护、去重和重启持久化成功。
+- 独立browser job成功，包含JS语法和真实Chromium六页切换。
+- 完整工作流仍为failure，不能宣称发布或商用验证通过。
