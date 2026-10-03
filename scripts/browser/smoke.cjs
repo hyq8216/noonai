@@ -6,7 +6,8 @@ const { spawn } = require('node:child_process');
 
 (async () => {
   const root = path.resolve(__dirname, '../..');
-  const browserCache = path.join(root, '.cloud-runtime/cache/playwright');
+  const preparedBrowsers = path.resolve(root, '../.noonai-assets/playwright');
+  const browserCache = fs.existsSync(preparedBrowsers) ? preparedBrowsers : path.join(root, '.cloud-runtime/cache/playwright');
   if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(browserCache)) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = browserCache;
   }
