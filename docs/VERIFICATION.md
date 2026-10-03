@@ -76,4 +76,16 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 增加仓库启动技能，始终用临时 --data、ready.json 与 HTTP 200 检查。
 - 本机 Python 3.12.14 安装成功、依赖诊断通过；服务启动/重启 smoke 通过。
 - 本机阿文 RAQM 仍为 false；不能将本机检查说成 Linux 或阿文图片验收。
-- 本轮完整回归与新版 Linux 复验进行中，最终结果随后记录。未修改业务测试或断言。
+- 本机完整回归：373 tests / 24 failures / 16 errors，即 333 通过；未修改业务测试或断言。
+- 真实新版云端复验提交 82bf0556ac3173cab9c4a360d4905f09514ff884：
+  Debian 13.6 / uid 1000 / 无 sudo / Python 3.12.14；setup 退出 0。
+  全新 shell Node 22.23.3，恢复 .cloud-runtime 内 npm/pip/Playwright 缓存；
+  Chromium 145.0.7632.6 实际启动，六页 products/import/automation/models/recovery/batch 通过。
+  独立 Python smoke 的启动、调度器、写保护、去重、持久化与重启通过。
+  check.sh 373 tests in 56.226s，24 failures / 16 errors；因失败返回 1，未绕过。
+  云端验收会话：https://chatgpt.com/local/01a10039-0dff-747f-9e07-1b3270401030
+- GitHub CI https://github.com/hyq8216/noonai/actions/runs/37099780962 ：
+  browser job 与独立启动/重启通过；373 tests in 75.116s，同样 24 failures / 16 errors。
+  backend job 及总体工作流失败，不能声称完整系统通过或具备真实卖家验收。
+- 修复 PR：https://github.com/hyq8216/noonai/pull/2 ，未合并；main 仍需单独授权同步。
+  账号环境的兼容内联配置及发布状态另行验收，不能由此 PR 推断已发布。
