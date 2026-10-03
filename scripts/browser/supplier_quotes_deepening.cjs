@@ -1,0 +1,27 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {runWorkflow}=require('./harness.cjs');
+runWorkflow('supplier quotes deepening: whole lots, delivery gates, selection and exported draft',async({page,call,navigate,settle,mobile})=>{
+ const pid=(await call('/api/import',{products:[{title_zh:'合成整批比较商品',facts:'合成报价依据'}]})).created[0];
+ const suppliers=[];for(const name of ['合成整批甲','合成整批乙'])suppliers.push(await call('/api/ops/entity',{kind:'supplier',name,request_id:crypto.randomUUID()}));
+ await navigate('supplier-quotes');await page.locator(`[data-sq-add="${pid}"]`).click();
+ for(const s of suppliers)await page.locator(`[data-sq-supplier="${s.id}"]`).click();
+ await page.locator('#supplier-quote-form [name="name"]').fill('合成整批询价');
+ await page.locator(`[data-sq-member="${pid}"]:not([data-member-field])`).fill('11');
+ await page.locator(`[data-sq-member-extra="${pid}"][data-member-field="required_by"]`).fill('2099-01-01');
+ await page.locator(`[data-sq-member-extra="${pid}"][data-member-field="selected_supplier_id"]`).selectOption(suppliers[0].id);
+ const field=(i,k)=>page.locator(`[data-sq-quote="${i}"][data-field="${k}"]`);
+ const set=async(i,values)=>{for(const [key,value] of Object.entries(values)){if(key==='currency')await field(i,key).selectOption(value);else await field(i,key).fill(value)}};
+ await set(0,{currency:'CNY',unit_price:'1.1234',min_quantity:'13',pack_quantity:'6',available_quantity:'100',valid_until:'2099-01-01',lead_days:'2',evidence:'合成甲原始报价'});
+ await set(1,{currency:'USD',unit_price:'0.1',min_quantity:'1',pack_quantity:'1',available_quantity:'8',valid_until:'2099-01-01',lead_days:'0',evidence:'合成乙原始报价'});
+ const preview=async()=>{await page.locator('#supplier-quote-form button[type="submit"]').click();await page.locator('#supplier-quote-preview').waitFor();assert.equal(await page.locator('#sq-save').isDisabled(),true)};
+ await preview();let text=await page.locator('#supplier-quote-preview').innerText();assert.match(text,/20\.2212/);assert.match(text,/11 \/ 18 \/ 7 \/ 0/);assert.match(text,/可供数量不足整批采购/);await mobile();
+ await page.locator('#sq-confirm').check();await field(0,'pack_quantity').fill('');await page.locator('#supplier-quote-preview').waitFor({state:'detached'});
+ await preview();text=await page.locator('#supplier-quote-preview').innerText();assert.match(text,/包装倍数待确认/);assert.match(text,/整批预算 待确认 CNY/);
+ await set(0,{pack_quantity:'6'});await preview();await page.locator('#sq-confirm').check();await page.locator('#sq-save').click();await page.locator('#supplier-quote-preview').waitFor({state:'detached'});await settle();
+ const summary=(await call('/api/supplier-quotes/state')).rows[0];const p=await call('/api/supplier-quotes/get?id='+summary.id);
+ assert.equal(p.procurement_draft.precheck_passed,true);assert.equal(p.procurement_draft.lines[0].order_quantity,18);assert.equal(p.procurement_draft.purchase_created,false);
+ await page.locator(`[data-sq-expand="${p.id}"] summary`).click();await page.locator(`[data-sq-detail="${p.id}"] table`).first().waitFor();await mobile();
+ const download=page.waitForEvent('download');await page.locator('#sq-export').click();const file=await download;const csv=fs.readFileSync(await file.path(),'utf8');assert.match(csv,/选入采购草稿/);assert.match(csv,/20\.2212/);assert.match(csv,/可供数量不足整批采购/);
+ const ops=await call('/api/state?surface=purchases');assert.equal(ops.ops.documents.length,0);
+}).catch(e=>{console.error(e);process.exitCode=1});

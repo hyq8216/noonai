@@ -460,13 +460,15 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/procurement/export':return self.respond(self.app.procurement.export(params),content_type='text/csv; charset=utf-8',filename='采购订单关联.csv')
             if path=='/api/after-sales/state':return self.respond(self.app.after_sales.state(params.get('page','0'),params.get('query',''),params.get('order_page','0')))
             if path=='/api/after-sales/export':return self.respond(self.app.after_sales.export(),content_type='text/csv; charset=utf-8',filename='售后核对.csv')
-            if path=='/api/alerts/state':return self.respond(self.app.alerts.state(params.get('page','0'),params.get('group','all')))
+            if path=='/api/alerts/state':return self.respond(self.app.alerts.state(params.get('page','0'),params.get('group','all'),params.get('severity','all'),params.get('sort','severity'),params.get('mode','all')))
+            if path=='/api/alerts/export':return self.respond(self.app.alerts.export(params),content_type='text/csv; charset=utf-8',filename='本地异常核对.csv')
             if path=='/api/batch-editor/state':return self.respond(self.app.batch_editor.state(params.get('page','0'),params.get('query',''),params.get('group','all')))
             if path=='/api/order-intake/state':return self.respond(self.app.order_intake.state(params.get('page','0')))
             if path=='/api/order-intake/template':return self.respond(self.app.order_intake.template().encode('utf-8'),content_type='text/csv; charset=utf-8',filename='订单导入模板.csv')
             if path=='/api/settlements/state':return self.respond(self.app.settlements.state(params.get('page','0')))
             if path=='/api/settlements/template':return self.respond(self.app.settlements.template(),content_type='text/csv; charset=utf-8',filename='结算核对模板.csv')
             if path=='/api/settlements/export':return self.respond(self.app.settlements.export(params.get('id')),content_type='text/csv; charset=utf-8',filename='结算核对.csv')
+            if path=='/api/catalog-groups/export':return self.respond(self.app.catalog_groups.export_csv(params.get('id','')),content_type='text/csv; charset=utf-8',filename='catalog-group-quality.csv')
             if path=='/api/catalog-groups/state':return self.respond(self.app.catalog_groups.state(params.get('page','0'),params.get('query',''),params.get('product_page','0')))
             if path=='/api/analytics/state':return self.respond(self.app.analytics.state(params))
             if path=='/api/analytics/export':return self.respond(self.app.analytics.export(params),content_type='text/csv; charset=utf-8',filename='运营分析.csv')
@@ -608,6 +610,7 @@ class Handler(BaseHTTPRequestHandler):
                 '/api/order-intake/apply':self.app.order_intake.apply,
                 '/api/settlements/preview':self.app.settlements.preview,
                 '/api/settlements/apply':self.app.settlements.apply,
+                '/api/catalog-groups/diagnose':self.app.catalog_groups.diagnose,
                 '/api/catalog-groups/preview':self.app.catalog_groups.preview,
                 '/api/catalog-groups/save':self.app.catalog_groups.save,
                 '/api/catalog-groups/remove':self.app.catalog_groups.remove,

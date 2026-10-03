@@ -4,6 +4,7 @@ import io
 import json
 import re
 from decimal import Decimal
+from datetime import date, timedelta
 from core import Problem, ident, now
 from finance import CURRENCIES, day, fingerprint
 from operations import qty, text
@@ -56,7 +57,7 @@ class SupplierQuotes:
             p = json.loads(row['data'])
             if p.get('demo'): raise Problem('示例商品不能用于询价')
             if type(m.get('revision')) is not int or m['revision'] != row['revision']: raise Problem('商品已变化，请刷新SKU版本并重新预览',409)
-            members.append({'product_id':pid,'revision':row['revision'],'facts_digest':self.snapshot(row),'sku':p.get('partner_sku',''),'title':p.get('title_zh',''),'quantity':qty(m.get('quantity'))})
+            members.append({'product_id':pid,'revision':row['revision'],'facts_digest':self.snapshot(row),'sku':p.get('partner_sku',''),'title':p.get('title_zh',''),'quantity':qty(m.get('quantity')), 'required_by':day(m['required_by'],'需求到货日期') if m.get('required_by') else None, 'selected_supplier_id':text(m.get('selected_supplier_id') or '', '选择报价供应商',100,True)})
             pids.add(pid)
         ids = b.get('supplier_ids')
         if not isinstance(ids,list) or not 1 <= len(ids) <= 50: raise Problem('需选择1至50个已登记供应商')
@@ -68,6 +69,7 @@ class SupplierQuotes:
             if not row: raise Problem('请先登记并选择供应商',404)
             suppliers.append({'id':sid,'name':row['name'],'facts_digest':fingerprint(json.loads(row['data']))})
             sids.add(sid)
+        if any(m['selected_supplier_id'] and m['selected_supplier_id'] not in sids for m in members): raise Problem('所选报价供应商必须属于本询价')
         rawquotes = b.get('quotes',[])
         if not isinstance(rawquotes,list) or len(rawquotes)>5000: raise Problem('报价明细格式无效或超过5000行')
         lookup = {}
@@ -87,7 +89,7 @@ class SupplierQuotes:
                 def integer(key,zero=False):
                     value = q.get(key)
                     return None if value is None or value=='' else qty(value,zero)
-                quote = {'product_id':m['product_id'],'supplier_id':s['id'],'supplier_name':s['name'],'sku':m['sku'],'currency':currency,'unit_price':decimal(q.get('unit_price'),'报价单价',places=4),'min_quantity':integer('min_quantity'),'lead_days':integer('lead_days',True),'valid_until':day(q['valid_until'],'报价有效期') if q.get('valid_until') else None,'evidence':text(q.get('evidence',''),'报价依据',2000,True)}
+                quote = {'product_id':m['product_id'],'supplier_id':s['id'],'supplier_name':s['name'],'sku':m['sku'],'currency':currency,'unit_price':decimal(q.get('unit_price'),'报价单价',places=4),'min_quantity':integer('min_quantity'),'pack_quantity':integer('pack_quantity'),'available_quantity':integer('available_quantity',True),'lead_days':integer('lead_days',True),'valid_until':day(q['valid_until'],'报价有效期') if q.get('valid_until') else None,'evidence':text(q.get('evidence',''),'报价依据',2000,True)}
                 quote['blockers'] = self.checks(quote,m['quantity'])
                 quotes.append(quote)
         ready = all(not q['blockers'] for q in quotes)
@@ -95,7 +97,7 @@ class SupplierQuotes:
         if status not in ('draft','checked'): raise Problem('只能保存草稿或本地预检通过状态')
         if status=='checked' and not ready: raise Problem('报价信息不完整、过期或起订量不符，仅可保存草稿')
         plan = {'name':text(b.get('name'),'询价名称',200),'status':status,'members':members,'supplier_ids':[s['id'] for s in suppliers],'suppliers':suppliers,'quotes':quotes,'precheck_passed':ready,'connection':'local_only','sendable':False,'supplier_order_sent':False,'payment_made':False,'notice':NOTICE}
-        token = fingerprint([old['id'] if old else None,old['revision'] if old else 0,plan])
+        token = fingerprint([old['id'] if old else None,old['revision'] if old else 0,plan,now()[:10]])
         return plan, old, token
 
     def enrich(self, c, plan, include_comparison=True):
@@ -120,7 +122,67 @@ class SupplierQuotes:
                 lowest = candidates[0]['unit_price'] if candidates else None
                 groups.append({'product_id':m['product_id'],'sku':m['sku'],'currency':currency,'quantity':m['quantity'],'comparable':bool(candidates) and not result['review_required'] and plan['status']!='cancelled','rows':[{'supplier_id':q['supplier_id'],'supplier_name':q['supplier_name'],'unit_price':q['unit_price'],'quoted_subtotal':format(Decimal(q['unit_price'])*m['quantity'],'f'),'lowest_unit_price':Decimal(q['unit_price'])==Decimal(lowest)} for q in candidates] if not result['review_required'] and plan['status']!='cancelled' else []})
         result['comparison'] = groups
+        self.fulfillment(result)
         return result
+
+    def fulfillment(self, result):
+        """Compute whole-lot alternatives and a read-only, revision-bound selection."""
+        today = date.fromisoformat(now()[:10])
+        rows = []; selections = []; budgets = {}
+        invalid = result['review_required'] or result['status'] == 'cancelled'
+        for m in result['members']:
+            alternatives = []
+            for q in result['quotes']:
+                if q['product_id'] != m['product_id']: continue
+                blockers = [b for b in q['blockers'] if b != '需求数量低于起订量']
+                for key, label in [('pack_quantity','包装倍数'),('available_quantity','可供数量')]:
+                    if q.get(key) is None: blockers.append(label+'待确认')
+                order_quantity = None
+                if q.get('min_quantity') is not None and q.get('pack_quantity') is not None:
+                    base = max(m['quantity'],q['min_quantity'])
+                    order_quantity = ((base+q['pack_quantity']-1)//q['pack_quantity'])*q['pack_quantity']
+                    if order_quantity > 1000000: blockers.append('整批采购数量超过1000000')
+                arrival = None
+                if q.get('lead_days') is not None:
+                    try: arrival = (today+timedelta(days=q['lead_days'])).isoformat()
+                    except OverflowError: blockers.append('交期超出可计算日期范围')
+                if m.get('required_by') and arrival and arrival > m['required_by']: blockers.append('预计到货晚于需求日期')
+                if order_quantity is not None and q.get('available_quantity') is not None and q['available_quantity'] < order_quantity:
+                    blockers.append('可供数量不足整批采购')
+                if invalid: blockers.append('询价已撤销' if result['status']=='cancelled' else '商品或供应商依据变化，需重新预检')
+                subtotal = format(Decimal(q['unit_price'])*order_quantity,'f') if q.get('unit_price') is not None and order_quantity is not None else None
+                gap = max(0,m['quantity']-q['available_quantity']) if q.get('available_quantity') is not None else None
+                row = {**q,'demand_quantity':m['quantity'],'required_by':m.get('required_by'),'order_quantity':order_quantity,
+                       'excess_quantity':order_quantity-m['quantity'] if order_quantity is not None else None,
+                       'shortage_quantity':gap,'estimated_arrival':arrival,'whole_lot_budget':subtotal,
+                       'fulfillable':not blockers,'fulfillment_blockers':blockers}
+                alternatives.append(row)
+            # Keep currencies separate, with no exchange-rate assumptions.
+            alternatives.sort(key=lambda r:(r['currency'] or '',not r['fulfillable'],Decimal(r['whole_lot_budget']) if r['whole_lot_budget'] is not None else Decimal('Infinity'),r['supplier_id']))
+            for r in alternatives:
+                eligible = [a for a in alternatives if a['currency']==r['currency'] and a['fulfillable']]
+                r['lowest_whole_lot_budget'] = r['fulfillable'] and bool(eligible) and Decimal(r['whole_lot_budget']) == min(Decimal(a['whole_lot_budget']) for a in eligible)
+            rows.extend(alternatives)
+            selected = next((r for r in alternatives if r['supplier_id']==m.get('selected_supplier_id')),None)
+            if selected:
+                line = dict(selected)
+                currency = selected['currency'] or '待确认币种'
+                budget = budgets.setdefault(currency,{'currency':selected['currency'],'known_subtotal':Decimal(0),'unknown_lines':0,'line_count':0})
+                budget['line_count'] += 1
+                if selected['whole_lot_budget'] is None: budget['unknown_lines'] += 1
+                else: budget['known_subtotal'] += Decimal(selected['whole_lot_budget'])
+            else:
+                line = {'product_id':m['product_id'],'sku':m['sku'],'demand_quantity':m['quantity'],'supplier_id':None,
+                        'shortage_quantity':m['quantity'],'fulfillable':False,'fulfillment_blockers':['尚未选择供应商报价']}
+            selections.append(line)
+        for b in budgets.values():
+            b['known_subtotal'] = format(b['known_subtotal'],'f')
+            b['total'] = None if b['unknown_lines'] else b['known_subtotal']
+        result['fulfillment'] = rows
+        result['procurement_draft'] = {'source_plan_id':result.get('id'),'source_revision':result.get('revision'),
+            'lines':selections,'budgets':list(budgets.values()),'precheck_passed':all(l['fulfillable'] for l in selections),
+            'unselected_count':sum(l['supplier_id'] is None for l in selections),'sendable':False,'purchase_created':False,
+            'notice':'仅为按供应商和原币分组的采购草稿；预算不含未明确运费税费，交期从今日起算，需人工核对仓库与费用，不创建采购或付款。'}
 
     def preview(self, body):
         with self.store.connect() as c:
@@ -193,13 +255,15 @@ class SupplierQuotes:
 
     def export(self):
         out=io.StringIO();w=csv.writer(out)
-        w.writerow(['询价编号','询价名称','版本','状态','需复核','SKU','需求数量','供应商','币种','单价','最小数量','有效期','交期天数','报价依据','门禁','仅本地询价'])
+        w.writerow(['询价编号','询价名称','版本','状态','需复核','SKU','需求数量','供应商','币种','单价','最小数量','有效期','交期天数','报价依据','门禁','仅本地询价','包装倍数','可供数量','需求到货日期','整批采购数量','超购数量','需求缺口','预计到货日期','整批原币预算','选入采购草稿','采购草稿门禁'])
         with self.store.connect() as c:
             c.execute('BEGIN')
             for r in c.execute('SELECT data FROM supplier_quote_plans ORDER BY updated_at DESC,id'):
                 p=self.enrich(c,json.loads(r['data']))
                 for q in p['quotes']:
+                    f=next(r for r in p['fulfillment'] if r['product_id']==q['product_id'] and r['supplier_id']==q['supplier_id'])
+                    member=next(m for m in p['members'] if m['product_id']==q['product_id'])
                     quantity=next(m['quantity'] for m in p['members'] if m['product_id']==q['product_id'])
-                    values=[p['id'],p['name'],p['revision'],p['status'],p['review_required'],q['sku'],quantity,q['supplier_name'],q['currency'],q['unit_price'],q['min_quantity'],q['valid_until'],q['lead_days'],q['evidence'],'；'.join(q['blockers']),True]
+                    values=[p['id'],p['name'],p['revision'],p['status'],p['review_required'],q['sku'],quantity,q['supplier_name'],q['currency'],q['unit_price'],q['min_quantity'],q['valid_until'],q['lead_days'],q['evidence'],'；'.join(q['blockers']),True,q.get('pack_quantity'),q.get('available_quantity'),member.get('required_by'),f['order_quantity'],f['excess_quantity'],f['shortage_quantity'],f['estimated_arrival'],f['whole_lot_budget'],member.get('selected_supplier_id')==q['supplier_id'],'；'.join(f['fulfillment_blockers'])]
                     w.writerow(['' if v is None else "'"+str(v) if str(v).lstrip().startswith(('=','+','-','@')) or str(v).startswith(('\t','\r','\n')) else v for v in values])
         return ('\ufeff'+out.getvalue()).encode('utf-8')

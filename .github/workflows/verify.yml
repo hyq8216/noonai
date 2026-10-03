@@ -83,3 +83,11 @@ jobs:
           for workflow in bank fulfillment after_sales procurement batch_edit alerts inventory_counts shipping_manifests pricing_plans ad_analytics import_profiles domestic_capture domestic_extension domestic_sources supplier_quotes fx_registry replenishment; do
             node "scripts/browser/${workflow}.cjs"
           done
+
+      - name: Deepened ERP business workflows
+        env:
+          NOON_PYTHON: python
+        run: |
+          for workflow in domestic_capture catalog_groups supplier_quotes replenishment analytics alerts; do
+            node "scripts/browser/${workflow}_deepening.cjs"
+          done

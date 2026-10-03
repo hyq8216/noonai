@@ -51,6 +51,10 @@ def run():
             if record:body.update(id=record['id'],revision=record['revision'])
             p=fx.preview(body)
             record=fx.save({**body,'preview_digest':p['preview_digest'],'confirmed':True,'request_id':f'capacity-fx-{i}'})
+        filtered=replenishment.state({'warehouse_id':warehouse,'suggestion':'needed'})
+        assert filtered['sku_page']['total']==5 and len(filtered['rows'])==5
+        unknown=replenishment.state({'warehouse_id':warehouse,'risk':'unknown','page':999})
+        assert unknown['sku_page']['total']==9995 and len(unknown['rows'])==45
         rows=replenishment.state({'warehouse_id':warehouse})
         assert rows['sku_page']['total']==10000 and len(rows['rows'])==50
         with store.connect() as c:
@@ -65,6 +69,7 @@ def run():
         return {'synthetic_only':True,'products':10000,'stock_rows':10000,'open_purchases':100,
             'quote_members':100,'quote_suppliers':10,'quote_rows':1000,'fx_versions':61,'manual_replenishment_rules':5,
             'measurements':[
+                measure('replenishment_needed_filter_5_of_10000',lambda:replenishment.state({'warehouse_id':warehouse,'suggestion':'needed'}),lambda v:len(v['rows'])),
                 measure('replenishment_50_of_10000',lambda:replenishment.state({'warehouse_id':warehouse}),lambda v:len(v['rows'])),
                 measure('supplier_quote_compact_1000_quotes',quotes.state,lambda v:len(v['rows'])),
                 measure('supplier_quote_explicit_detail_1000_quotes',lambda:quotes.get(quote['id']),lambda v:len(v['quotes'])),
