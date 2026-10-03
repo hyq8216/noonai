@@ -10,6 +10,17 @@ disable TLS verification or copy macOS .venv/desktop bundles into Linux.
 
 For each shell use `bash scripts/with-runtime.sh COMMAND ...`; installation shell
 exports do not persist. Always use `.venv/bin/python` explicitly.
+In account-prepared Cloud images, read `/workspace/.noonai-tools/start.md`
+and `/workspace/.noonai-tools/install.sh` if present. They describe the current
+published assets, including `/workspace/.noonai-assets/playwright`. The runtime
+helper preserves an explicitly configured PLAYWRIGHT_BROWSERS_PATH and selects
+prepared browser assets beside the checkout before its local cache fallback.
+Verify browser launch after ordinary task creation; setup-chat verification alone
+is insufficient. If the pinned browser is absent, use the official installer
+`npx --prefix scripts/browser playwright install chromium` with the same exported
+asset path. Do not invoke sudo/--with-deps in an unprivileged image or bypass TLS.
+For sandbox-denied localhost test sockets, use the normal command approval flow;
+report denial rather than changing security policy or claiming the smoke passed.
 
 1. Run `bash scripts/with-runtime.sh .venv/bin/python scripts/doctor.py`.
 2. Create `PREVIEW_DATA=$(mktemp -d)` in the startup shell. Never use workbench/data.
