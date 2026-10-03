@@ -39,7 +39,7 @@ Noon店铺、真实商品生图、价格库存写入、商用部署及新macOS�
 
 ## macOS 安装包
 
-新版0.43.0构建入口：在Mac仓库目录运行 `./desktop/build_dmg.command`，产物为DMG、备用ZIP和SHA256校验文件。完整步骤见[桌面构建说明](desktop/README.md)。当前Linux环境没有生成新版DMG，GitHub macOS构建也未执行；不把构建脚本当作已交付的安装包。
+新版0.43.0 Apple Silicon安装包已通过真实macOS构建和挂载验证：[下载产物](https://github.com/hyq8216/noonai/actions/runs/37114268786/artifacts/11270788090)，解压后使用DMG。内含备用ZIP和SHA256校验文件；采用临时签名，未Apple公证。自行构建运行 `./desktop/build_dmg.command`，步骤见[桌面构建说明](desktop/README.md)。
 
 ## 资料
 

@@ -2,13 +2,18 @@
 
 日期：2026-10-03（Asia/Shanghai）。
 
-## macOS DMG发布准备（0.43.0）
+## macOS DMG实际交付（0.43.0）
 
-- 首次macOS原生运行 https://github.com/hyq8216/noonai/actions/runs/37114062386 ：20项桌面测试通过、arm64 PyInstaller和Swift编译完成；lipo输入路径位于可变架构列表后，工具将路径误当架构而失败。已修正输入路径置前，并追加独立命令参数回归，准备再次构建。
+- **实际macOS构建通过** https://github.com/hyq8216/noonai/actions/runs/37114268786 ，源码提交 `04556d91a37c0175a714b5a0cf35ca50b00762b2`，树 `b05d557dbf4a63bf60e802c0b943b33986ece9f8` 与本地一致。macOS 26.6.2/arm64，21项桌面测试36.216秒全部通过；Swift编译、架构、临时签名及冻结后端实际启动、21模块接口、扩展ZIP、库存占用/发货守恒、FFmpeg成片通过。
+- DMG生成、hdiutil verify、只读挂载后的应用版本/所有Mach-O架构/签名及拖动安装捷径/指南核对通过；生成DMG、备用ZIP及各自SHA256。Artifact `11270788090`，125221040字节，archive SHA256 `01e2904671ef17f2298820038573d1cfbc92c1f31ee3385718a0ed5dce9972e3`。此为产物ZIP摘要，不冒充DMG自身摘要。
+- DMG已下载到本地：`/tmp/noonai-release-0.43.0/Noon-Studio-0.43.0-macOS-arm64.dmg`，70816720字节，SHA256 `03eb8ed92891e1a50490cf1cb02db0a95c70fc551646837f26c412bbfdd103c0`。传输运行 https://github.com/hyq8216/noonai/actions/runs/37114577174 成功；3个分段ZIP各自摘要、分段长度/摘要、完整DMG长度/摘要及UDIF尾部标识全部核对通过；与原Mac构建清单一致。二进制没有提交到Git。
+- 运行时代码的GitHub Linux验收 https://github.com/hyq8216/noonai/actions/runs/37114270586 ：backend与browser均success。
+- 未做Apple Developer ID签名/公证，未原生窗口逐页点击，未验证Mac12或Intel运行，也未验证真实Noon账号。
+- 首次macOS原生运行 https://github.com/hyq8216/noonai/actions/runs/37114062386 ：20项桌面测试通过、arm64 PyInstaller和Swift编译完成；lipo输入路径位于可变架构列表后，工具将路径误当架构而失败。已修正输入路径置前，并追加独立命令参数回归；随后运行37114268786通过。
 - 本地环境Linux/x86_64，没有Swift/Xcode/hdiutil。终端GitHub API请求Forbidden；GitHub连接器仓库访问成功，仓库public且具有push权限，改用连接器同步独立构建分支，不合并main、不发布Release。
 - 新增一键Mac构建入口、0.43.0/43版本元数据、原生arm64/x86_64检查、临时构建与失败保留旧程序、冻结运行时隔离检查、DMG/ZIP/SHA256打包及只读挂载检查；包含当前21模块、40页和国内采集扩展五文件。
 - `desktop/tests` 20项通过（0.845秒）：14项模拟打包编排及6项构建前提/真实源码协议检查。源码包装器实际临时建单、占用/发货数量守恒、下载扩展和FFmpeg视频导出通过；不是macOS冻结程序或WKWebView验收。原有历史 verify_bundle.py 保留。
-- **`bash scripts/check.sh` 返回0**：业务776 tests，103.463秒，全部通过；桌面20项编排测试通过；40页桌面/窄屏与20个本地Chromium脚本均通过。实际macOS构建结果随后记录。日志 `/tmp/noonai-dmg-full-check.log`。
+- **`bash scripts/check.sh` 返回0**：业务776 tests，103.463秒，全部通过；桌面20项编排测试通过；40页桌面/窄屏与20个本地Chromium脚本均通过。实际macOS构建证据见本节。日志 `/tmp/noonai-dmg-full-check.log`。
 
 ## 时间预算内追加：供应链与汇率集成
 
