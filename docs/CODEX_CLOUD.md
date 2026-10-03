@@ -10,7 +10,14 @@ https://learn.chatgpt.com/docs/environments/cloud-environments
 
 新版 Install script 使用 `bash scripts/setup.sh`；Start skill 使用
 `.codex/cloud-start.md` 的启动步骤。每个新 shell 用 `bash scripts/with-runtime.sh`
-恢复 Node 22 和浏览器缓存配置。固定浏览器下载需允许官方 CDN 域名
+恢复 Node 22 和浏览器资产配置。账号环境已准备的浏览器使用
+`/workspace/.noonai-assets/playwright`；普通任务可读取
+`/workspace/.noonai-tools/install.sh` 与 `start.md`，每个 shell 显式恢复路径。
+仓库 helper 保留显式 PLAYWRIGHT_BROWSERS_PATH，优先选择仓库旁的准备资产，
+没有准备资产时才使用本地缓存。普通任务须实际检查浏览器启动；缺失时按同一路径
+执行官方 `npx --prefix scripts/browser playwright install chromium`，不用 sudo。
+本地测试 socket 如被命令沙箱阻止，按正常命令审批执行并如实记录，不能改变安全策略。
+固定浏览器下载需允许官方 CDN 域名
 `cdn.playwright.dev`、`playwright.download.prss.microsoft.com`、`storage.googleapis.com`。
 具体网络策略以账号配置和下载实测为准，不禁用 TLS 或下载校验。
 
