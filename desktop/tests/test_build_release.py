@@ -38,6 +38,12 @@ class ReleaseTests(unittest.TestCase):
                 build.preflight('arm64')
             command.assert_not_called()
 
+    def test_lipo_input_precedes_variadic_verify_arch_arguments(self):
+        binary=Path('/tmp/Noon Studio.app/Contents/MacOS/NoonStudio')
+        with patch.object(build,'run') as command:
+            build.verify_arch(binary,'arm64')
+            command.assert_called_once_with('lipo',binary,'-verify_arch','arm64')
+
     def test_release_metadata_matches_installer(self):
         release=build.release_info()
         self.assertEqual(release['version'],'0.43.0')

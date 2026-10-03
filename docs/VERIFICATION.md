@@ -4,6 +4,7 @@
 
 ## macOS DMG发布准备（0.43.0）
 
+- 首次macOS原生运行 https://github.com/hyq8216/noonai/actions/runs/37114062386 ：20项桌面测试通过、arm64 PyInstaller和Swift编译完成；lipo输入路径位于可变架构列表后，工具将路径误当架构而失败。已修正输入路径置前，并追加独立命令参数回归，准备再次构建。
 - 本地环境Linux/x86_64，没有Swift/Xcode/hdiutil。终端GitHub API请求Forbidden；GitHub连接器仓库访问成功，仓库public且具有push权限，改用连接器同步独立构建分支，不合并main、不发布Release。
 - 新增一键Mac构建入口、0.43.0/43版本元数据、原生arm64/x86_64检查、临时构建与失败保留旧程序、冻结运行时隔离检查、DMG/ZIP/SHA256打包及只读挂载检查；包含当前21模块、40页和国内采集扩展五文件。
 - `desktop/tests` 20项通过（0.845秒）：14项模拟打包编排及6项构建前提/真实源码协议检查。源码包装器实际临时建单、占用/发货数量守恒、下载扩展和FFmpeg视频导出通过；不是macOS冻结程序或WKWebView验收。原有历史 verify_bundle.py 保留。

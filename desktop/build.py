@@ -19,6 +19,10 @@ def run(*args):
     subprocess.run([str(x) for x in args], check=True, cwd=ROOT)
 
 
+def verify_arch(path, arch):
+    run('lipo', path, '-verify_arch', arch)
+
+
 def preflight(arch):
     if platform.system() != 'Darwin':
         raise SystemExit('macOS is required to build this app; Linux cannot compile or package the macOS runtime.')
@@ -106,8 +110,8 @@ def build_app(dist, arch, overwrite=False):
                   'NSHumanReadableCopyright': 'Noon Studio · Local development build'}
         with (built / 'Contents/Info.plist').open('wb') as handle:
             plistlib.dump(bundle, handle)
-        run('lipo', '-verify_arch', arch, mac / 'NoonStudio')
-        run('lipo', '-verify_arch', arch, resources / 'backend/noon-backend')
+        verify_arch(mac / 'NoonStudio', arch)
+        verify_arch(resources / 'backend/noon-backend', arch)
         run('codesign', '--force', '--deep', '--sign', '-', built)
         run('codesign', '--verify', '--deep', '--strict', built)
         # Verify the actual frozen runtime before replacing a previous app.
