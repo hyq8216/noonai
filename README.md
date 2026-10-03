@@ -11,12 +11,16 @@ Python 3.12 + Node.js 22，仓库根目录执行：
 ```bash
 bash scripts/setup.sh
 bash scripts/check.sh
-.venv/bin/python workbench/server.py --data /tmp/noonai-preview --port 8791
+PREVIEW_DATA=$(mktemp -d)
+bash scripts/with-runtime.sh .venv/bin/python workbench/server.py --data "$PREVIEW_DATA" --port 8791
 ```
 
 `setup.sh` 创建独立虚拟环境，安装锁定的运行依赖和 Chromium；
 `maintenance.sh` 更新缓存环境；`doctor.py` 检查依赖与 FFmpeg。
 服务只监听 127.0.0.1，写操作使用会话令牌。
+新版云端无 sudo 时使用镜像已有系统库，安装脚本不调用管理员安装器；
+每个新 shell 使用 `bash scripts/with-runtime.sh COMMAND ...` 恢复 Node 22 与仓库内缓存路径。
+启动技能见 [.codex/cloud-start.md](.codex/cloud-start.md)。
 
 Codex Cloud 设置、能力边界与启动提示词见 [云端环境说明](docs/CODEX_CLOUD.md)。
 GitHub Actions 在 push、PR、手动启动和每日定时执行全量测试及独立浏览器检查。

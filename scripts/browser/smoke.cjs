@@ -3,10 +3,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { chromium } = require('playwright');
 
 (async () => {
   const root = path.resolve(__dirname, '../..');
+  const browserCache = path.join(root, '.cloud-runtime/cache/playwright');
+  if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(browserCache)) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = browserCache;
+  }
+  const { chromium } = require('playwright');
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'noonai-browser-'));
   const ready = path.join(data, 'ready.json');
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>

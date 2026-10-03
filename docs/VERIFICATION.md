@@ -63,3 +63,17 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 实际启动、调度器、写保护、去重和重启持久化成功。
 - 独立browser job成功，包含JS语法和真实Chromium六页切换。
 - 完整工作流仍为failure，不能宣称发布或商用验证通过。
+
+## 2026-10-03 新版云端兼容修复
+
+复现来源：新版环境实际为 Debian 13.6、普通用户、无 sudo；仓库原 setup.sh
+在 Linux 调用 sudo apt-get 和 Playwright --with-deps。准备任务单独安装成功不代表
+仓库脚本可在新任务复用；Node 22 和 Playwright 缓存的 shell exports 也不会跨阶段保存。
+
+- setup.sh 在无管理员权限时使用镜像已有库，不调用 sudo；缺少字体时明确失败。
+- Node 22 与 npm/pip/Playwright 缓存位于忽略提交的 .cloud-runtime；
+  with-runtime.sh 在每个 shell 恢复运行配置，check.sh 与浏览器检查使用同一缓存。
+- 增加仓库启动技能，始终用临时 --data、ready.json 与 HTTP 200 检查。
+- 本机 Python 3.12.14 安装成功、依赖诊断通过；服务启动/重启 smoke 通过。
+- 本机阿文 RAQM 仍为 false；不能将本机检查说成 Linux 或阿文图片验收。
+- 本轮完整回归与新版 Linux 复验进行中，最终结果随后记录。未修改业务测试或断言。
