@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = '0.43.0'
+VERSION = '0.44.0'
 MACHO_MAGICS = {bytes.fromhex(value) for value in (
     'feedface', 'cefaedfe', 'feedfacf', 'cffaedfe', 'cafebabe', 'bebafeca',
     'cafebabf', 'bfbafeca')}

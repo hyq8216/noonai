@@ -179,3 +179,60 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 实际启动、调度器、写保护、去重和重启持久化成功。
 - 独立browser job成功，包含JS语法和真实Chromium六页切换。
 - 完整工作流仍为failure，不能宣称发布或商用验证通过。
+
+
+## 2026-10-03：云端六模块集成与紧凑导航 0.44.0
+
+本轮基于用户提供的云端分支`codex/erp-deepening-0.44.0`，fetch并读取基线
+`d17afcfdbc9071566097ba675a22b43b2050cb60`的PRODUCT、路线图、深化资料及相关源码。
+在独立工作树`codex/navigation-compact`实现，不覆盖原目录未提交记录。
+本轮用户将侧栏归类简化列为优先；明确选择“只展开当前组，切换时自动展开”。
+
+### 改动与复现
+
+原导航40入口全部展开。现为运营总览及六组单组展开；采集/素材、采购/库存、
+财务对账与资料备份按二/三级组织。默认批量铺货页只显示5个页面入口，六组仍可发现。
+搜索展示匹配层级，Escape清空，单结果Enter进入；成功跳转展开父组，取消离开保留
+当前表单。折叠只更新导航；数据刷新保留折叠与滚动。390px默认侧栏高68px，菜单按需打开。
+详细层级与交互见[NAVIGATION.md](NAVIGATION.md)。
+
+初轮新navigation.js未加入HTTP静态白名单，真实浏览器发现404和启动错误；已补入，
+专项浏览器与实际冻结后端检查均要求该资源返回成功。原采集回归在DB完成、界面回执
+尚未刷新时断言按钮禁用，复现失败；保留原有禁用、确认与幂等回放断言，等待busy结束
+及channelImportResult后再断言。独立复测及最终全量通过。
+原导航脚本使用真实按钮展开父菜单；窄屏菜单收起时route是attached，实际目标页面标题
+仍需可见。没有通过隐藏控件、直接调用navigate或删除断言绕过新UI。
+
+### 最终验证
+
+- `bash scripts/check.sh`最终返回0：819业务单测、21桌面编排单测全部通过；
+  隔离启动/调度/写保护/去重/持久化/重启通过；27个真实Chromium脚本通过，含40页
+  在1440px及390px的逐页点击；无文档横向溢出或未捕获JS错误。
+- 新专项`node scripts/browser/navigation.cjs`通过：全部40路由、单组展开、三级父路径、
+  搜索与空态、Escape/Enter、数据刷新折叠保持、1440/900/390px、菜单开关、
+  未保存表单在折叠及取消离开时保留、确认放弃后没有写入草稿。
+- Impeccable机械检测一次：28条advisory、0条非advisory；存量辅助字号与配色提示保留，
+  新导航颜色和层级在DESIGN记录。桌面/窄屏截图实际查看，没有更换原视觉世界。
+- 真正macOS arm64构建成功：lipo架构、ad-hoc签名及codesign结构检查通过；
+  冻结后端21模块、MV3扩展、库存守恒、内置FFmpeg和navigation.js读取通过。
+- 原生WKWebView在新的临时`--data`工作空间启动，读到标题“批量铺货”，商品0条，
+  页面总导航按钮43（侧栏40及正文3），overflow=false。首次测试驱动误认为输出不带
+  后缀，已读取Swift实际生成的`.json`及内层ui JSON完成核对；没有改写业务结果。
+- DMG真实创建、只读挂载、版本/架构/签名、Applications快捷方式、安装说明一致性
+  检查及卸载通过；DMG和ZIP生成的SHA256在下载目录再次核对一致。
+
+完整日志与截图保存在忽略目录`output/navigation-0.44.0/`及`output/playwright/navigation-*`。
+测试均使用临时数据目录；未打开workbench/data或默认真实业务目录，未调用卖家、模型、
+银行、供应商消息或真实采购。`real_noon_verified=false`，尚未做Apple公证。
+当前机器与版本的原生启动证据不代表所有目标macOS版本已验收。
+
+### 本机安装包
+
+- `/Users/mac/Downloads/Noon-Studio-0.44.0/Noon-Studio-0.44.0-macOS-arm64.dmg`
+  71676745 bytes；SHA256 `9a2994f9b17d700e3a3d661f3424e7b7dc7f362a3b80f6750de525ecb6448862`。
+- 同目录ZIP：61306488 bytes；SHA256
+  `f15f8841773edeab16e7a65077def454d300dc0e0b157aabf369acc911583a84`。
+- 原生.app在`desktop/dist-navigation-0.44.0/Noon Studio.app`；安装说明
+  [INSTALL-0.44.0.md](../desktop/INSTALL-0.44.0.md)。本机安装包、环境和数据不提交到公共仓库。
+
+下一步仍沿用全平台路线；本轮导航与分发不是完整真实经营闭环验收。

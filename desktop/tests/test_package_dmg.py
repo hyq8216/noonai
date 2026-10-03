@@ -63,6 +63,8 @@ class PackagingTests(unittest.TestCase):
         return subprocess.CompletedProcess(args, 0, stdout, b'')
 
     def package(self, **kwargs):
+        # Keep the historical fake 0.43 app fixture independent of the current release default.
+        kwargs.setdefault('version', '0.43.0')
         with patch.object(pack.platform, 'system', return_value='Darwin'), patch.object(pack, 'run', self.fake_run):
             return pack.package_dmg(self.app, self.output, guide=self.guide, **kwargs)
 

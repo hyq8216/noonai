@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {runWorkflow} = require('./harness.cjs');
@@ -107,7 +108,7 @@ runWorkflow('confirmed physical inventory differences, stale preview and CSV', a
   await page.locator('#inventory-counts-evidence').fill('尚未保存的新实盘草稿');
   assert.equal(await page.evaluate(()=>dirty),true);
   page.once('dialog',dialog=>dialog.dismiss());
-  await page.locator('.nav [data-nav="products"]').click();
+  await clickNavigation(page,'products');
   await settle();
   assert.equal(await page.evaluate(()=>view),'inventory-counts','declining discard keeps the draft');
   assert.equal(await page.locator('#inventory-counts-evidence').inputValue(),'尚未保存的新实盘草稿');

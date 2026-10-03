@@ -8,6 +8,7 @@ PYTHON="${NOON_PYTHON:-.venv/bin/python}"
 "$PYTHON" scripts/smoke.py
 for script in workbench/static/*.js browser-extension/domestic-capture/*.js; do node --check "$script"; done
 node scripts/browser/smoke.cjs
+node scripts/browser/navigation.cjs
 node scripts/browser/collection.cjs
 node scripts/browser/erp.cjs
 node scripts/browser/bank.cjs

@@ -59,7 +59,7 @@ def verify(app):
                 for surface in SURFACES:
                     if not isinstance(json.loads(read('/api/' + surface + '/state')), dict):
                         raise RuntimeError('Invalid module response: ' + surface)
-                for name in ('supplier_quotes', 'fx_registry', 'replenishment', 'domestic_capture',
+                for name in ('navigation', 'supplier_quotes', 'fx_registry', 'replenishment', 'domestic_capture',
                              'inventory_counts', 'shipping_manifests', 'pricing_plans', 'ad_analytics', 'import_profiles'):
                     if not read('/' + name + '.js'):
                         raise RuntimeError('Bundled JavaScript is missing: ' + name)

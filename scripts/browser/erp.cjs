@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -29,7 +30,7 @@ const { chromium } = require('playwright');
     page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(JSON.parse(fs.readFileSync(ready)).url);
-    await page.locator('.nav [data-nav="order-intake"]').waitFor();
+    await page.locator('.nav [data-nav="order-intake"]').waitFor({state:'attached'});
     const seeded = await page.evaluate(async () => {
       const shop = await api('/api/ops/entity', {kind:'shop',name:'合成ERP店铺',request_id:crypto.randomUUID()});
       const warehouse = await api('/api/ops/entity', {kind:'warehouse',name:'合成ERP仓库',request_id:crypto.randomUUID()});
@@ -41,7 +42,7 @@ const { chromium } = require('playwright');
     });
     const black = seeded.products.find(p=>p.source_sku==='BLACK');
     const blue = seeded.products.find(p=>p.source_sku==='BLUE');
-    await page.locator('.nav [data-nav="order-intake"]').click();
+    await clickNavigation(page,'order-intake');
     await page.locator('#order-intake-shop option').nth(1).waitFor({state:'attached'});
     await page.locator('#order-intake-shop').selectOption(seeded.shop.id);
     await page.locator('#order-intake-warehouse').selectOption(seeded.warehouse.id);
@@ -62,7 +63,7 @@ const { chromium } = require('playwright');
     await page.locator('#order-intake-template').click();
     assert.equal((await template).suggestedFilename(),'订单导入模板.csv');
 
-    await page.locator('.nav [data-nav="settlements"]').click();
+    await clickNavigation(page,'settlements');
     await page.locator('#settlement-shop').selectOption(seeded.shop.id);
     await page.locator('#settlement-file').setInputFiles({name:'synthetic-settlement.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify([
       {evidence_key:'synthetic-browser-sale',external_id:'SYNTHETIC-ERP-1',category:'sale',currency:'SAR',amount:'25.00',date:new Date().toISOString().slice(0,10),fx:'1.9',evidence:'合成结算第1行',kind:'income'},
@@ -80,7 +81,7 @@ const { chromium } = require('playwright');
     await page.locator('#settlement-export').click();
     assert.ok((await exported).suggestedFilename().endsWith('.csv'));
 
-    await page.locator('.nav [data-nav="catalog-groups"]').click();
+    await clickNavigation(page,'catalog-groups');
     await page.locator('#catalog-group-form [name="name"]').fill('合成夹子系列');
     await page.locator(`[data-cg-add="${black.id}"]`).click();
     await page.locator(`[data-cg-value][data-pid="${black.id}"]`).fill('黑色');
@@ -95,7 +96,7 @@ const { chromium } = require('playwright');
     const group = await page.evaluate(async()=> (await api('/api/catalog-groups/state')).rows[0]);
     assert.equal(group.members.length,2); assert.equal(group.review_required,false);
 
-    await page.locator('.nav [data-nav="analytics"]').click();
+    await clickNavigation(page,'analytics');
     await page.locator('#analytics-filter').waitFor();
     const analytics = await page.evaluate(async()=> await api('/api/analytics/state'));
     assert.equal(analytics.orders.total,1);
@@ -104,7 +105,7 @@ const { chromium } = require('playwright');
     await page.setViewportSize({width:390,height:900});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
 
-    await page.locator('.nav [data-nav="backup-schedules"]').click();
+    await clickNavigation(page,'backup-schedules');
     await page.locator('#backup-rule-enabled').check();
     await page.locator('#backup-rule-interval').fill('60');
     await page.locator('#backup-rule-retain').fill('2');

@@ -72,6 +72,10 @@ jobs:
         env:
           NOON_PYTHON: python
         run: node scripts/browser/collection.cjs
+      - name: Compact navigation and unsaved-form protection
+        env:
+          NOON_PYTHON: python
+        run: node scripts/browser/navigation.cjs
       - name: Local ERP business workflow
         env:
           NOON_PYTHON: python

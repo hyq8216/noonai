@@ -20,6 +20,7 @@ runWorkflow('domestic source registration without foreign connectors or credenti
   assert.equal(account.enabled,true);
  }
  await mobile();
+ await page.locator('#nav-mobile-toggle').click(); // Mobile navigation now opens on demand.
  await page.locator('#nav-search').fill('1688');
  assert.equal(await page.locator('.nav [data-nav]').count(),2);
  await page.locator('#nav-search').fill('');
