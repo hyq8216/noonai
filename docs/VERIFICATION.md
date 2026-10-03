@@ -110,3 +110,28 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
   .venv/bin/python 与保存的 Node 缓存入口独立可用，不依赖上一会话 exports。
 - 新草稿仅验收，不改变或发布配置；临时数据已清理，无运行中验收服务。
   原生桌面任务选择器仍未独立验收，不能把设置列表当作选择器证明。
+
+## 普通云端任务创建与浏览器准备资产修复
+
+用户截图显示“无法开始此聊天”；截图没有失败任务 ID 或底层错误码，不能将其直接
+归因于 GitHub 合并冲突。此前编辑草稿验收不能替代普通任务创建验收。
+
+- Chrome 普通新聊天实际选择 noonai 新云端并创建任务
+  https://chatgpt.com/local/01a10077-8c9e-7408-96c0-449ba28c5004 。
+  main 6d2276e、Python 3.12.14、Node 22.23.3；仓库读取及命令实际执行成功。
+- 该任务的 .cloud-runtime/cache/playwright 不存在；Chromium Headless Shell 缺失。
+  本地 socket 初次被命令沙箱拒绝；正常命令审批后服务 smoke 通过。
+  官方安装 Chromium 后，服务/重启及六页 browser smoke 均退出 0。
+- 修复账号准备资产：浏览器改用 /workspace/.noonai-assets/playwright；
+  准备 /workspace/.noonai-tools/install.sh 和 start.md，普通任务可直接读取。
+  安装和启动说明读回与磁盘文件一致；新路径 Chromium 启动、服务及六页 smoke 通过。
+  保存并重新发布环境，未改变网络/安全策略，不使用 sudo/--with-deps/TLS 绕过。
+- 仓库 runtime 保留显式浏览器路径，自动选择仓库旁准备资产；独立 browser smoke
+  使用同样的资产选择。配置路径保留断言、本机实际 Chromium 六页 smoke 通过。
+  本机完整回归 373 tests in 278.997s，24 failures / 16 errors（333 通过）；未绕过断言。
+- 新普通任务 https://chatgpt.com/local/01a10082-ac07-74b6-b0df-eb672899f014
+  初次读取即发现两个准备文件和 chromium_headless_shell-1208，无需重新下载。
+  最终普通任务实际运行通过：正常命令审批后 doctor / service smoke / browser smoke
+  各退出 0；ready.json 实际端口 37233 HTTP 200，六页导航无未捕获 JS 错误。
+  没有下载或补装浏览器；tracked 文件无改动，临时业务数据及活动服务已清理。
+  主动记录首次 socket 拒绝，不修改安全策略；不把原截图失败原因记为已定位。
