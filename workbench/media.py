@@ -96,6 +96,13 @@ def draw_text(draw,value,box,size,color='#19242c'):
     is_ar=bool(re.search('[\u0600-\u06ff]',value))
     if is_ar and not features.check('raqm'):raise Problem('当前图片引擎不支持阿文排版，请更换环境或使用英文模板')
     paths=['/System/Library/Fonts/Supplemental/Arial Unicode.ttf','/System/Library/Fonts/PingFang.ttc','/System/Library/Fonts/Helvetica.ttc']
+    # Linux cloud runners do not have macOS fonts. Select a font that covers
+    # the requested script rather than silently rendering Chinese as boxes.
+    if re.search('[\u3400-\u9fff]',value):
+        paths+=['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc']
+    else:
+        paths+=['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']
     font_path=next((p for p in paths if Path(p).is_file()),None)
     if not font_path:raise Problem('模板字体不可用')
     font=ImageFont.truetype(font_path,size)

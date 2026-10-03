@@ -25,7 +25,8 @@ GitHub Actions 在 push、PR、手动启动和每日定时执行全量测试及�
 
 2026-10-03 首次接入：本地原始基线 373 项测试，25 failures、17 errors。
 该结果来自迁移前已有代码；CI 保留这些失败，不能宣称完整平台通过验收。
-当前验证与下一步见 [验证记录](docs/VERIFICATION.md) 和 [自动化路线图](docs/AUTOMATION_ROADMAP.md)。
+本轮修复后复测为24 failures、16 errors；Linux安装/诊断/服务器重启/Chromium检查通过，
+全量回归继续失败。当前验证与下一步见 [验证记录](docs/VERIFICATION.md) 和 [自动化路线图](docs/AUTOMATION_ROADMAP.md)。
 真实 noon 店铺、1688 授权、真实商品生图、价格库存写入与商用云部署仍待验证。
 
 ## 资料

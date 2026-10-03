@@ -34,3 +34,22 @@ Codex Cloud 账号环境创建与 setup 回读；GitHub Linux CI 首次结果；
 - 投递箱大文件规则已是20MB，将旧4MB测试的超限样例更新至真实上限；仍验证错误隔离和符号链接拒绝。
 - 本地诊断通过；实际服务启动/调度器/写保护/去重/重启持久化通过；真实Chromium六页切换通过。
 - 全量回归失败继续保留，不绕过或跳过。上述本地验证不代表Linux云端或真实店铺验证。
+
+## 复测与GitHub Linux执行
+
+- 修复后本地全量：373 tests，24 failures，16 errors（333通过，40项待修复）。
+- 独立Python3.12环境 setup.sh 安装成功；pip check 无冲突；10项投递箱回归全部通过。
+- 首次GitHub运行：https://github.com/hyq8216/noonai/actions/runs/37092039943 ，提交059b934。
+- Linux依赖安装、pip check、环境诊断、实际服务器启动/重启：全部成功。
+- Linux JS语法检查与真实Chromium六页导航：成功。
+- Linux全量回归：失败；日志artifact已成功保存。失败不能标记为发布通过。
+- Codex本地聊天心跳 noonai 已启用，每6小时推进一项；这不是已验证的云端定时开发。
+- Codex Cloud账号环境仍需在设置页创建或选择并确认setup结果，本轮UI工具两次超时。
+
+Linux全量日志核对为25 failures、16 errors（41项）：比本地多一项图片模板失败，
+原因是字体路径仅支持macOS。本轮补充Linux字体选择及中/英/阿文字绘制环境诊断，
+setup和CI安装Noto CJK与DejaVu。后续CI结果必须独立回读。
+跟踪问题：https://github.com/hyq8216/noonai/issues/1 。
+
+本机新建PyPI运行环境的Pillow未提供RAQM；诊断明确记录arabic_layout=false，
+英文/中文模板通过。阿文模板沿用阻止错误排版的门禁，不能据此声称本机阿文图片已可用。
