@@ -1,6 +1,6 @@
-# Noon Studio for macOS · 0.38
+# Noon Studio for macOS · 0.42
 
-最新开发构建为 `dist-v42/Noon Studio.app`，安装包 `dist/Noon-Studio-0.42.0-macOS-arm64.dmg`，备用 ZIP 同目录。本版包含页面大文件直投、链接候选池、图片模板及分镜要求、批量异常历史导出。按用户要求本轮暂不做功能测试；构建和签名结构检查不能代替业务运行验收。安装说明见 `INSTALL-0.42.0.md`。
+仓库内的 `dist-v42/Noon Studio.app`、`dist/Noon-Studio-0.42.0-macOS-arm64.dmg` 和备用 ZIP 于2026-10-03构建，包含页面大文件直投、链接候选池、图片模板及分镜要求、批量异常历史导出。2026-10-05从当前工作树临时重建的 Apple Silicon 应用及包内后端回归通过，但没有替换上述仓库安装包。本地开发包未经 Developer ID 签名或公证；测试也不证明真实店铺接入。安装说明见 `INSTALL-0.42.0.md`。
 
 0.37 历史测试版为 `dist-v37/Noon Studio.app`，压缩包 `dist/Noon-Studio-0.37.0-macOS-arm64.zip`。修复首页按钮绑定报错，以及批量铺货中编辑 AI 风格后点击视频开关失效的问题；后台刷新不会在表单编辑时重绘。Codex 独立审查与隔离浏览器操作记录见 `qa/independent-v36-review.md` 和 `qa/browser-v37.md`。真实 noon 店铺、原生 Mac 点击及长期运行仍未验证。
 

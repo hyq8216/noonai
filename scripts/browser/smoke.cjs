@@ -191,6 +191,10 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
         const sourcing = page.locator('.settings-row').filter({hasText:'1688 货源'});
         assert.match(await sourcing.innerText(), /申请开发者与应用/);
         assert.match(await sourcing.innerText(), /商品搜索\/详情\/规格库存读取权限/);
+        const sourcingItems = await sourcing.locator('ol li').allTextContents();
+        assert.equal(sourcingItems.length,6);
+        assert.match(sourcingItems[2], /2026-09-17.*调用资源层级.*单应用配额.*并发.*分页上限/);
+        assert.match(sourcingItems[3], /2026-09-02.*SKU\s*阶梯价.*起订量.*规格库存字段.*刷新时效/);
         assert.equal(await sourcing.locator('a[href="https://aop.alibaba.com/"]').count(),1);
         assert.equal(await sourcing.locator('a[href="https://aop.alibaba.com/doc/notice.htm"]').count(),1);
       }

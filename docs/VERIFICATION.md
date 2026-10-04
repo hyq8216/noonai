@@ -539,6 +539,29 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 验收：`node --check scripts/browser/smoke.cjs`通过。`bash scripts/check.sh`退出0：447项业务测试通过（48.702秒），隔离服务启动/调度/写保护/导入去重/持久化重启通过；真实Chromium在桌面和390px布局走完18个入口，无横向溢出，且新增断言确认1688申请步骤、商品搜索/详情/规格库存权限说明及两个官方链接实际呈现。10,000 SKU临时数据精确搜索12ms、每页50件通过；这些是本机单次合成基准。`git diff --check`通过。
 - 边界：这是官方接入准备指引，不是1688连接器；未发起真实API调用、未使用供应商账号/密钥、未采集真实商品，也未连接Noon店铺或上架；`real_noon_verified=false`。下一步需要获批应用的当前接口文档、权限与脱敏测试回执。
 
+### 2026-10-05 1688公告变化核对项与浏览器回归
+
+- 依据：重新查看阿里巴巴开放平台公告索引，确认列出2026-09-17“关于分销商品相关接口调用资源分层治理公告”、2026-09-02“关于‘1688批发价体系升级’对 ISV 影响的公告”，以及2026-01-14旧 API 下线（有可替换的新 API）公告。官方首页说明平台提供跨境业务/分销相关 API 场景，但不能据此推断当前账号可用的方法、权限或配额。来源：[开放平台首页](https://aop.alibaba.com/)；[官方公告索引](https://aop.alibaba.com/doc/notice.htm)。
+- 改动：连接设置清单补入应用资源层级、单应用配额、并发、批量/分页上限，以及实际可得 SKU 阶梯价、MOQ、规格库存字段和刷新时效核对项；明确未核实的进货价不得进入 noon 定价。Chromium smoke 断言这些提示及官方入口真实呈现。
+- 验收：`node --check workbench/static/app.js`、`node --check scripts/browser/smoke.cjs`、`git diff --check`通过；完整 `bash scripts/check.sh` 结果记录于本节之后的复跑记录。
+- 边界：公告索引的标题/日期不等于公告全文、获批权限、真实接口可调用、配额或当前价格数据；当前官方文档详情页仍未提供本项目可验证的脱敏测试响应，故没有新增采集器或接口调用。该功能仍为 HOLD；不读取账号凭证、不访问真实供应商商品，不提交 Noon，`real_noon_verified=false`。
+
+### 2026-10-05 1688公告提示变更完整复归
+
+- 复验范围：当前 macOS 工作树，`bash scripts/check.sh`；脚本报告 `business_data: not inspected` 与 `real_noon_verified: false`，本次不读取 `workbench/data`。
+- 结果：退出码0；**447项业务测试通过（70.609秒）**；隔离服务启动、调度器、无令牌写保护、导入去重、持久化和重启检查通过。真实 Chromium 桌面与390px手机布局通过18个分组导航入口，以及铺货只读预检、离线双语生成/模型复核后停在人审、库存预览、零价和过期报价警告、调度、原图权利导入、提交回执人工对账、异常CSV及货源候选池流程。新增设置页断言确认1688公告核验清单与两个官方入口可见。
+- 性能：10,000件合成目录导入0.505秒，全量快照0.690秒/21,997,861字节，Python峰值分配165,706,657字节；普通不变回读0.382毫秒/4条SQL，边界刷新0.454毫秒/6条SQL，单件增量0.488毫秒/2,363字节；启动就绪1,131毫秒，初始状态6毫秒/9,167字节，列表84毫秒，精确SKU查询12毫秒，50件分页通过。以上均为单次本机合成数据，不构成生产SLA。
+- 附加校验：`node --check workbench/static/app.js`、`node --check scripts/browser/smoke.cjs`、`git diff --check`通过。
+- 边界：本地全量测试及浏览器结果不等于本轮远端 Ubuntu CI；不证明1688应用授权、真实接口调用/配额/商品内容权利，也不证明 Noon 店铺写入、Offer可售、订单或利润。未发生任何真实外部服务调用，`real_noon_verified=false`。
+
+### 2026-10-05 最新设置页 Apple Silicon 打包和原生启动
+
+- 构建：执行 `NOON_BUILD_DIST=/tmp/noon-app-20261005-respin desktop/.venv/bin/python desktop/build.py` 成功，产出 `/tmp/noon-app-20261005-respin/Noon Studio.app`，约119 MB、Apple Silicon arm64、版本0.42.0、最低 macOS 12.0。`codesign --verify --deep --strict`通过；签名为本地 ad-hoc，不是Developer ID签名或公证。
+- 包内回归：`NOON_VERIFY_APP='/tmp/noon-app-20261005-respin/Noon Studio.app' desktop/.venv/bin/python desktop/verify_bundle.py` 退出0。打包后端的独立运行、备份恢复和回退包、跨仓调拨/补货、分批财务收款、视觉路由与去重、业务单据回环、FFmpeg图组视频、媒体Range读取和重启持久化通过；没有调用真实视觉服务。
+- 原生启动：在 `NOON_STUDIO_DATA=/tmp/noon-native-respin-data`、`NOON_SMOKE_OUTPUT=/tmp/noon-native-respin-smoke` 下启动 `.app` 实际 Mach-O。WKWebView记录文档标题“Noon Studio · 沙特运营平台”、页面标题“批量铺货”、后端状态`true`、商品数0、横向溢出`false`；正常退出后 `dirty=Optional(0); error=nil`，ready文件已删除。首屏图 `/tmp/noon-native-respin-smoke.png`。
+- 打包前端读回：用配套 Chromium 打开该包启动的临时本机服务，导航至“连接设置”，实测出现两条2026年官方公告核对说明、两个1688官方链接及“待官方授权”状态；截图 `/tmp/noon-native-respin-settings.png`。商品/资料均为空白隔离测试库。
+- 边界：这验证本地Apple Silicon开发包的启动、打包后端和前端静态资源，不是可交付安装器；没有生成DMG、Developer ID签名、公证或真实店铺操作。截图与包留在 `/tmp` 临时验证目录，未覆盖 `desktop/dist`，`real_noon_verified=false`。
+
 
 ### 2026-10-04 完整回归复跑
 
@@ -569,3 +592,12 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 本机验收：最新完整 `bash scripts/check.sh` 退出0，447项业务测试通过（47.140秒），隔离服务启动/调度/写保护/导入去重/持久化重启通过；之后针对最终浏览器脚本再次 `node --check scripts/browser/smoke.cjs` 和 `node scripts/browser/smoke.cjs` 均通过。Chromium 覆盖桌面与390px移动18个入口、10,000 SKU 搜索/分页、历史筛选/错误行下载及目录批次确认→假 Codex 英阿生成→复核→停在人工审核；本机合成数据单次读数为启动就绪478ms、商品列表62ms、精确 SKU 搜索13ms、每页50项。
 - 远端验收：PR #2 当前 head `540c162a2c637ebf14ab44704d6c48a9b5009e6a` / GitHub Actions run `37206266250`（#71），Ubuntu backend 与 Chromium browser jobs 均成功。
 - 边界：测试只启动临时假 Codex 协议服务和合成目录数据，不连接真实 Codex 登录或消耗订阅额度，不连接 1688，也不提交 Noon。流程停在人工审批；没有真实店铺回读、有效可售或利润证明，`real_noon_verified=false`。本轮只扩大测试证据，不代表整个平台交付完成。
+
+### 2026-10-05 当前工作树全量、浏览器和 Apple Silicon 包回归
+
+- 基线：macOS 27 / Apple Silicon，本地分支 `codex/cloud-runtime-compatibility`，HEAD `6351b6d`，含未提交源代码更改。检查没有读取 `workbench/data`；服务、10,000 SKU样本、浏览器商品、媒体和账本都使用临时数据。
+- 全量检查：`bash scripts/check.sh` 退出0，447项业务测试通过（50.172秒）；隔离服务启动、调度、写保护、导入去重、持久化和重启检查通过；真实 Chromium 桌面和390px布局完成18个导航目标及铺货、内容复核停在人审、库存/报价、调度、图片权利导入、提交对账和候选池流程。10,000 SKU单次合成基准：启动就绪1,096ms，初次状态5ms/9,167字节，商品列表79ms，精确SKU搜索13ms，50件分页通过；快照0.762秒/21,997,861字节，峰值Python分配165,706,657字节；普通不变回读1.406ms/4条SQL，跨桶边界回读0.459ms/6条SQL，单商品增量0.558ms/2,363字节。以上为本机单次数据，不是生产SLA。
+- 包装检查：用 `NOON_BUILD_DIST=/tmp/noon-goal-20261005 desktop/.venv/bin/python desktop/build.py` 构建临时 Apple Silicon arm64 `.app`，版本0.42.0；构建脚本签名与额外 `codesign --verify --deep --strict` 均通过。`NOON_VERIFY_APP='/tmp/noon-goal-20261005/Noon Studio.app' desktop/.venv/bin/python desktop/verify_bundle.py` 退出0；包内后端独立运行并通过采购/订单/财务、跨仓调拨/补货、视觉任务去重、FFmpeg视频、媒体范围读取、重启持久化、备份恢复/回退及双实例写保护检查，没有调用真实生图服务。此次未产DMG、未运行原生窗口冒烟，也未作Developer ID签名或公证。
+- 发现并修正：桌面 README 首页仍标为0.38，且把2026-10-03仓库DMG误写成当前构建、写着本轮不测试；与构建脚本及2026-10-05实际临时构建/回归不符。将标题改为0.42并说明仓库DMG日期、本轮验证范围和未替换安装包。文档复核由 `git diff --check` 完成。
+- 代码与CI对照：只读 `git ls-remote` 核对远端 PR 分支为 docs-only head `dcf5610610995f621a69dfc508028565215cdbbd`；PR 页面记录对应 run `37206461168` 的 Ubuntu backend 与 browser jobs成功。逐文件比较远端树与当前工作树后，所有已跟踪的 Noon 应用源码/测试相同；8个本地未跟踪的 `workbench` 源码/测试文件，其 `git hash-object` 与远端树 blob ID逐个一致。远端比较只剩 `desktop/README.md`、`docs/AUTOMATION_ROADMAP.md`、`docs/VERIFICATION.md` 的本地文档更新及上述未跟踪文件在本地索引状态上的表现。因此当前软件源码/测试已由该 Linux CI 覆盖，无需为了重复代码而改写分叉的提交历史。
+- 边界和下一步：本机全量与包验证只使用合成数据；没有真实1688授权、真实模型调用、noon账号写入、Offer回读、有效可售或经营结果，`real_noon_verified=false`。下一项仍需获批的1688接口资料、权限和脱敏测试回执；获得之前继续保留采集接入的 HOLD，不猜接口、不做未授权页面抓取。
