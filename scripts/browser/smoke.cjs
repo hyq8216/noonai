@@ -9,7 +9,7 @@ const { spawn, spawnSync } = require('node:child_process');
   const pythonExe = process.env.NOON_PYTHON || path.join(root, '.venv/bin/python');
   const fakeCodexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'noonai-fake-codex-'));
   const fakeCodex = path.join(fakeCodexDir, 'codex');
-  fs.writeFileSync(fakeCodex, `#!${pythonExe}\n${String.raw`
+  fs.writeFileSync(fakeCodex, `#!/usr/bin/env python3\n${String.raw`
 import json,sys,time
 content={'title_en':'Synthetic black storage clips','description_en':'Black plastic storage clips.','title_ar':'مشابك تخزين سوداء','description_ar':'مشابك تخزين بلاستيكية سوداء','warnings':[]}
 def send(value): print(json.dumps(value),flush=True)
