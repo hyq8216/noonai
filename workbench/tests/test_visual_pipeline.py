@@ -5,7 +5,7 @@ from unittest.mock import patch
 import test_visual_checks as comparison
 from core import Problem,ident,now
 CHECK_FAKE=comparison.FAKE
-from test_visuals import FAKE as IMAGE_FAKE
+from test_visuals import FAKE as IMAGE_FAKE,synthetic_output
 
 PIPE_FAKE='import sys\nexec('+repr(IMAGE_FAKE)+" if 'features.image_generation=true' in sys.argv else "+repr(CHECK_FAKE)+')\n'
 
@@ -28,7 +28,8 @@ class VisualPipelineTests(unittest.TestCase):
   self.assertEqual(results[0],results[1]);self.assertEqual(len(results[0]['check_job_ids']),2);self.assertTrue(all(j['status']=='waiting_image' for j in self.v.state()['jobs']));self.v.tick();self.assertEqual(self.app.models.state()['calls'],[])
  def test_actual_protocol_generation_then_automatic_comparison(self):
   self.binary.write_text('#!'+sys.executable+'\n'+PIPE_FAKE);out=self.pipeline(2)
-  with patch.dict(os.environ,{'NOON_VISUAL_FILE':str(self.image)}):self.app.visuals.drain()
+  generated=synthetic_output(self.root/'generated.png')
+  with patch.dict(os.environ,{'NOON_VISUAL_FILE':str(generated)}):self.app.visuals.drain()
   self.assertTrue(all(self.app.visuals.get(i)['status']=='candidate' for i in out['job_ids']))
   self.v.tick();self.v.tick();self.assertTrue(all(self.row(i)['status']=='done' for i in out['check_job_ids']));self.assertEqual(len(self.app.models.state()['calls']),2)
   self.v.tick();self.assertEqual(len(self.app.models.state()['calls']),2);self.assertTrue(all(self.app.visuals.get(i)['status']=='candidate' for i in out['job_ids']))

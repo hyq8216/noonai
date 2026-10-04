@@ -80,9 +80,13 @@ def hero_background_white(path):
     corners=((0,0,edge_x,edge_y),(width-edge_x,0,width,edge_y),
              (0,height-edge_y,edge_x,height),(width-edge_x,height-edge_y,width,height))
     fractions=[]
+    pixels=image.load()
     for box in corners:
-        pixels=list(image.crop(box).getdata())
-        fractions.append(sum(min(pixel)>=242 and max(pixel)-min(pixel)<=12 for pixel in pixels)/len(pixels))
+        x0,y0,x1,y1=box
+        count=(x1-x0)*(y1-y0)
+        white=sum(min(pixel)>=242 and max(pixel)-min(pixel)<=12
+            for y in range(y0,y1) for x in range(x0,x1) for pixel in (pixels[x,y],))
+        fractions.append(white/count)
     return sum(fraction>=.9 for fraction in fractions)>=3
 
 def prompt_for(recipe):
@@ -418,7 +422,12 @@ class Visuals:
             self.codex.preflight(rpc,r['model'],images=True);self.current(r)
             paths=[]
             for i,a in enumerate(r['references']):
-                path=Path(cwd)/(str(i)+Path(a['file']).suffix);shutil.copyfile(self.media.root/a['file'],path);paths.append(path)
+                path=Path(cwd)/(str(i)+Path(a['file']).suffix);shutil.copyfile(self.media.root/a['file'],path)
+                # The source was checked above, but may change while it is copied.
+                # Verify the exact bytes that will be sent before starting a model turn.
+                if hashlib.sha256(path.read_bytes()).hexdigest()!=a['sha256']:
+                    raise Problem('复制到生图任务的参考原图与已核验版本不一致，未发送任务',409)
+                paths.append(path)
             def mark(tid):
                 if self.stopping.is_set():raise Problem('应用正在关闭，未发送生图任务')
                 with self.store.connect() as c:

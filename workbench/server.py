@@ -3,6 +3,7 @@ import base64
 import csv
 import io
 import json
+import math
 import mimetypes
 import os
 import re
@@ -13,6 +14,7 @@ import zipfile
 import fcntl
 import tempfile
 import signal
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,8 +33,9 @@ from visual_presets import VisualPresets
 from source_leads import SourceLeads
 from finance import Finance
 from recovery import Recovery, MAX_ARCHIVE
+from backup_agent import run_backup_schedule_once
 from core import Store, Problem, now, payload, normalize_image
-from connectors import load_env, settings, translate, Noon, preflight_attributes
+from connectors import load_env, settings, translate, Noon, preflight_attributes, RateLimited
 
 BASE=Path(__file__).resolve().parent
 load_env(BASE/'.env')
@@ -95,6 +98,34 @@ class App:
         if self.models.configured():
             config.update(text_ready=self.models.ready(),text_model=self.models.resolve('primary')['model'])
         return config
+    def record_noon_rate_limit(self,error):
+        delay=error.retry_after_seconds if error.retry_after_seconds is not None else 60
+        until=(datetime.now(timezone.utc)+timedelta(seconds=delay)).isoformat()
+        with self.store.connect() as c:
+            row=c.execute("SELECT value FROM runtime_state WHERE key='noon_rate_limited_until'").fetchone()
+            if row:
+                try:
+                    previous=datetime.fromisoformat(row['value'])
+                    if previous.tzinfo is None:previous=previous.replace(tzinfo=timezone.utc)
+                    candidate=datetime.fromisoformat(until)
+                    if previous>candidate:until=previous.isoformat()
+                except (TypeError,ValueError):pass
+            c.execute("INSERT INTO runtime_state(key,value,updated_at) VALUES('noon_rate_limited_until',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(until,now()))
+    def check_noon_cooldown(self):
+        with self.store.connect() as c:
+            row=c.execute("SELECT value FROM runtime_state WHERE key='noon_rate_limited_until'").fetchone()
+            if not row:return
+            try:
+                until=datetime.fromisoformat(row['value'])
+                if until.tzinfo is None:until=until.replace(tzinfo=timezone.utc)
+                remaining=math.ceil((until-datetime.now(timezone.utc)).total_seconds())
+            except (TypeError,ValueError):
+                raise Problem('noon限流冷却记录无法读取；为避免继续触发限流，本次请求未发送',503)
+            if remaining>0:raise Problem(f'noon API 限流冷却中，约剩余 {remaining} 秒；本次请求未发送，请等待后再手动安排',429)
+            c.execute("DELETE FROM runtime_state WHERE key='noon_rate_limited_until'")
+    def noon_client(self):
+        self.check_noon_cooldown()
+        return Noon(on_rate_limited=self.record_noon_rate_limit)
     def category_rules(self,pid,b):
         from category_rules import contract
         p=self.store.get(pid)
@@ -103,7 +134,7 @@ class App:
         source=b.get('source')
         if source=='platform':
             if not self.config()['noon_ready']:raise Problem('店铺尚未接入，暂不能读取平台类目规则',409)
-            raw=Noon().attributes(p['category'])
+            raw=self.noon_client().attributes(p['category'])
         elif source=='file':raw=b.get('contract')
         else:raise Problem('规则来源无效')
         spec=contract(raw)
@@ -131,7 +162,10 @@ class App:
         if kind=='prices' and (p['demo'] or p.get('mode')!='LOCAL'):raise Problem('仅真实且已确认本地模式的商品可读取沙特本地售价',409)
         if kind=='refresh' and not (p.get('platform') or {}).get('sku_parent'): raise Problem('尚无平台商品编号可回查',409)
         jid=self.store.add_job(pid,kind,revision)
-        self.executor.submit(self.run,jid,p,kind)
+        try:self.executor.submit(self.run,jid,p,kind)
+        except RuntimeError:
+            self.store.job_result(jid,'failed','应用正在关闭，任务尚未开始外部调用；请重新打开后再安排')
+            raise Problem('应用正在关闭，任务尚未发送；请重新打开后再安排',503)
         return {'job_id':jid}
     def run(self,jid,p,kind):
         # Claim only pending work. A queued executor callback may already be cancelled.
@@ -140,8 +174,7 @@ class App:
         if not claimed:return
         try:
             if kind=='image-host':
-                result=self.image_host.publish(p)
-                self.store.job_result(jid,'done','图片已上传并通过公网内容核对，请重新审核商品',result)
+                self.image_host.publish(p,job_id=jid)
             elif kind=='translate':
                 if self.models.configured():
                     generated=self.models.translate(p,'product-job:'+jid)
@@ -159,9 +192,16 @@ class App:
                     raise Problem('当前版本已有平台提交回执，本次未重复发送',409)
                 if not self.config()['noon_ready'] or not self.config()['submit_enabled']:
                     raise Problem('店铺内容提交配置已变化，本次未发送',409)
-                client=Noon(); data=payload(current)
+                client=self.noon_client(); data=payload(current)
                 preflight_attributes(client.attributes(current['category']),data)
                 try: result=client.submit(data)
+                except RateLimited as e:
+                    # A 429 is an explicit rate-limit response, unlike a timeout
+                    # where Noon may have accepted the write without a reply.
+                    # Preserve a manual retry path, but never retry automatically.
+                    self.record_noon_rate_limit(e)
+                    self.store.job_result(jid,'failed',str(e))
+                    return
                 except Exception:
                     self.store.job_result(jid,'uncertain','提交请求可能已到达 noon。请先按 SKU 在平台核对，禁止直接重发当前版本')
                     return
@@ -177,14 +217,14 @@ class App:
                 except Exception:
                     self.store.job_result(jid,'uncertain','noon 可能已接收内容，但本地回执未完整保存。请先按 SKU 回查，禁止直接重发当前版本')
             elif kind=='offers':
-                result=Noon().offers(p['partner_sku'])
+                result=self.noon_client().offers(p['partner_sku'])
                 self.store.record_offer(p['id'],p['partner_sku'],result,p['revision'])
                 self.store.job_result(jid,'done','已读取报价、净库存及前台可见反馈；未修改价格库存')
             elif kind=='prices':
                 current=self.store.get(p['id'])
                 if current['revision']!=p['revision'] or current.get('mode')!='LOCAL' or current['partner_sku']!=p['partner_sku']:
                     raise Problem('经营模式或商品资料已变化，本次售价回查未发送',409)
-                result=Noon().pricing_get_sa(p['partner_sku'])
+                result=self.noon_client().pricing_get_sa(p['partner_sku'])
                 self.store.record_pricing(p['id'],p['partner_sku'],result,p['revision'])
                 item=result['items'][0]
                 code=item['status']['status_code']
@@ -194,7 +234,7 @@ class App:
                 parent=p['platform']['sku_parent']
                 if (self.store.get(p['id']).get('platform') or {}).get('sku_parent')!=parent:
                     raise Problem('平台商品编号已变化，本次回查未发送，请重新安排',409)
-                result=Noon().content(parent)
+                result=self.noon_client().content(parent)
                 if not isinstance(result,dict) or result.get('sku_parent')!=parent or not isinstance(result.get('statuses'),list):
                     raise Problem('平台回查返回编号不匹配或格式不完整，保留上次有效记录',502)
                 self.store.record_platform(p['id'],{**p['platform'],'content_response':result,'checked_at':now(),'live_verified':False},expected_parent=parent)
@@ -224,8 +264,9 @@ class App:
         if not eligible:return
         try:
             from transfer_status import batch_items
-            items=batch_items(Noon().transfer_prices_get([p['partner_sku'] for _,p in eligible]),[p['partner_sku'] for _,p in eligible])
+            items=batch_items(self.noon_client().transfer_prices_get([p['partner_sku'] for _,p in eligible]),[p['partner_sku'] for _,p in eligible])
         except Problem as e:
+            if isinstance(e,RateLimited):self.record_noon_rate_limit(e)
             for jid,_ in eligible:self.store.job_result(jid,'failed',str(e))
             return
         except Exception:
@@ -260,6 +301,19 @@ class Handler(BaseHTTPRequestHandler):
         if filename: self.send_header('Content-Disposition',f'attachment; filename="{filename}"')
         self.end_headers()
         if self.command!='HEAD':self.wfile.write(body)
+        # Successful user mutations may unblock an approval, a scheduled run,
+        # or a retry. Wake the workflow scheduler instead of waiting for its
+        # bounded fallback scan.
+        # POST is also used for previews, exports, and read-only diagnostics.
+        # Those must not bypass a workflow retry cooldown. Configuration and
+        # business mutations still wake the scheduler immediately.
+        path=urlsplit(self.path).path
+        read_only_post=(path.endswith('/preview') or path.endswith('-preview') or path in {
+            '/api/models/codex/status','/api/models/probe','/api/finance/export',
+            '/api/source-leads/export','/api/noon/categories','/api/visuals/get','/api/export',
+        })
+        if self.command=='POST' and 200<=status<400 and not read_only_post and hasattr(self.server,'app'):
+            self.app.automation.wake()
     def safe_host(self):
         expected={f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'}
         if self.headers.get('Host') not in expected: raise Problem('仅允许从本机访问',403)
@@ -355,6 +409,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self.safe_host(); path=urlsplit(self.path).path
+            if path=='/healthz':
+                return self.respond({'status':'ok','service':'noon-studio'},200)
+            if path=='/readyz':
+                try:
+                    with self.app.store.connect() as c:c.execute('SELECT 1').fetchone()
+                except Exception:
+                    return self.respond({'status':'not_ready','checks':{'database':'error'}},503)
+                return self.respond({'status':'ready','checks':{'database':'ok'}},200)
             if path=='/api/platform-batch/status':
                 return self.respond(PlatformBatch(self.app,parse_qs(urlsplit(self.path).query).get('kind',['refresh'])[0]).status(parse_qs(urlsplit(self.path).query).get('request_id',[''])[0]))
             if path=='/api/content-submit-batch/status':
@@ -442,6 +504,9 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/media/bulk-upload':return self.upload_media(bulk=True)
             if path=='/api/source-inbox/upload':return self.upload_catalog()
             b=self.body()
+            if path=='/api/jobs/reconcile-submit':
+                if b.get('confirmed') is not True:raise Problem('请确认已在 noon Seller Lab 按 SKU 核对结果')
+                return self.respond(store.reconcile_submit(b.get('job_id'),b.get('outcome'),b.get('partner_sku'),b.get('evidence'),b.get('sku_parent','')))
             if path.startswith('/api/image-host/'):
                 action=path.removeprefix('/api/image-host/')
                 if action not in ('save','preview','apply','cancel'):raise Problem('操作不存在',404)
@@ -453,6 +518,10 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/source-leads/preview':return self.respond(self.app.source_leads.preview(b))
             if path=='/api/source-leads/add':return self.respond(self.app.source_leads.add(b))
             if path=='/api/backup/create':return self.respond(self.app.recovery.create())
+            if path=='/api/backup/schedule-config':return self.respond(self.app.recovery.configure_schedule(b))
+            if path=='/api/backup/retention-preview':
+                keep=b.get('keep',10)
+                return self.respond(self.app.recovery.retention_preview(keep))
             if path=='/api/backup/schedule':return self.respond(self.app.recovery.schedule(b))
             if path=='/api/backup/cancel':return self.respond(self.app.recovery.cancel())
             if path=='/api/finance/export':return self.respond(self.app.finance.csv(),content_type='text/csv; charset=utf-8',filename='noon-finance.csv')
@@ -483,6 +552,7 @@ class Handler(BaseHTTPRequestHandler):
                 from approval_batch import ApprovalBatch
                 batch=ApprovalBatch(store,self.app.validate_product_visuals)
                 return self.respond(batch.apply(b) if path.endswith('/apply') else batch.preview(b))
+            if path=='/api/automation/settings':return self.respond(self.app.automation.configure_scheduler(b))
             if path=='/api/automation/preflight':return self.respond(self.app.automation.preflight(b))
             if path=='/api/category-batch/preview':
                 from category_batch import CategoryBatch
@@ -537,7 +607,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/demo':
                 return self.respond(store.import_rows(json.loads((BASE/'examples'/'sample.json').read_text()),demo=True))
             if path=='/api/export': return self.respond(export_package(store,b.get('ids')),content_type='application/zip',filename='noon-content-drafts.zip')
-            if path=='/api/noon/categories': return self.respond(Noon().categories())
+            if path=='/api/noon/categories': return self.respond(self.app.noon_client().categories())
             match=re.fullmatch(r'/api/products/([a-f0-9]{32})/(save|approve|image|images|translate|submit|refresh|offers|prices)',path)
             if not match: raise Problem('操作不存在',404)
             pid,action=match.groups(); revision=b.get('revision')
@@ -570,7 +640,7 @@ def start(root,port,ready_file=None):
     try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('此资料库已由另一个实例打开')
     Recovery(root,expected=[]).apply_pending()
-    app=App(root); app.media.start(); app.automation.start(); app.visuals.start(); app.visual_checks.start(); app.source_inbox.start(); server=LocalHTTPServer(('127.0.0.1',port),Handler); server.app=app
+    app=App(root); app.media.start(); app.automation.start(); app.visuals.start(); app.visual_checks.start(); app.source_inbox.start(); app.recovery.start(); server=LocalHTTPServer(('127.0.0.1',port),Handler); server.app=app
     print(f'商品工作台已启动：http://127.0.0.1:{server.server_port}',flush=True)
     if ready_file:
         target=Path(ready_file); target.write_text(json.dumps({'url':f'http://127.0.0.1:{server.server_port}','pid':os.getpid()})); target.chmod(0o600)
@@ -578,9 +648,18 @@ def start(root,port,ready_file=None):
     signal.signal(signal.SIGTERM,stop)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
-    finally: server.server_close(); app.source_inbox.close(); app.models.codex.close(); app.visual_checks.close(); app.visuals.close(); app.automation.close(); app.media.close(); app.executor.shutdown(wait=False,cancel_futures=True)
+    finally: server.server_close(); app.source_inbox.close(); app.recovery.close(); app.models.codex.close(); app.visual_checks.close(); app.visuals.close(); app.automation.close(); app.media.close(); app.executor.shutdown(wait=False,cancel_futures=True)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8791); parser.add_argument('--data',default=str(BASE/'data'))
     parser.add_argument('--ready-file')
-    args=parser.parse_args(); start(args.data,args.port,args.ready_file)
+    parser.add_argument('--backup-schedule-once',action='store_true',help=argparse.SUPPRESS)
+    args=parser.parse_args()
+    if args.backup_schedule_once:
+        try:
+            print(json.dumps(run_backup_schedule_once(args.data),ensure_ascii=False),flush=True)
+            raise SystemExit(0)
+        except Exception as exc:
+            print(json.dumps({'status':'failed','error':str(exc)[:300]},ensure_ascii=False),flush=True)
+            raise SystemExit(1)
+    start(args.data,args.port,args.ready_file)

@@ -123,8 +123,25 @@ class Models:
             for r in calls:
                 r['usage']=json.loads(r['usage']) if r['usage'] else None
                 r['billing']='subscription' if json.loads(r.pop('profile')).get('provider')=='codex-subscription' else 'api'
-            day=now()[:10];totals=[dict(r) for r in c.execute('SELECT profile_id,count(*) AS calls,sum(charged_micro) AS estimated_micro FROM model_calls WHERE created_at>=? GROUP BY profile_id',(day,))]
+            day=now()[:10];totals=[dict(r) for r in c.execute('''SELECT profile_id,count(*) AS calls,
+                coalesce(sum(charged_micro),0) AS estimated_micro,
+                sum(CASE WHEN status IN ('calling','uncertain') THEN 1 ELSE 0 END) AS unresolved_calls
+                FROM model_calls WHERE created_at>=? GROUP BY profile_id''',(day,))]
             terms=[dict(r) for r in c.execute('SELECT id,source,en,ar,revision,updated_at FROM model_terms ORDER BY source_key')]
+        totals_by_profile={r['profile_id']:r for r in totals}
+        for p in profiles:
+            used=totals_by_profile.get(p['id'],{})
+            call_count=int(used.get('calls',0));limit=int(p['daily_calls'])
+            call_percent=100.0 if limit==0 else min(100.0,round(call_count*100/limit,1))
+            is_subscription=p['provider']=='codex-subscription'
+            estimate=int(used.get('estimated_micro',0));budget=0 if is_subscription else int(Decimal(p['daily_usd'])*1000000)
+            spend_percent=0.0 if is_subscription or budget==0 else min(100.0,round(estimate*100/budget,1))
+            exhausted=call_count>=limit or (not is_subscription and budget>0 and estimate>=budget)
+            warning=not exhausted and (call_percent>=80 or (not is_subscription and spend_percent>=80))
+            p['daily_budget']={'calls':call_count,'calls_limit':limit,'calls_remaining':max(0,limit-call_count),
+                'calls_percent':call_percent,'estimated_micro':estimate,'budget_micro':budget,
+                'estimated_percent':spend_percent,'unresolved_calls':int(used.get('unresolved_calls',0)),
+                'state':'exhausted' if exhausted else 'warning' if warning else 'normal'}
         return {'profiles':profiles,'routes':routes,'calls':calls,'today':totals,'day_utc':day,'codex':self.codex.state(),'terms':terms}
 
     def save_term(self,b):

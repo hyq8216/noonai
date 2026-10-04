@@ -1,3 +1,6 @@
+import csv
+import hashlib
+import io
 import os
 import sqlite3
 import sys
@@ -52,6 +55,38 @@ class SourceInboxTests(unittest.TestCase):
         self.assertEqual([x['status'] for x in self.box.state()['files']],['done','attention'])
         self.assertTrue(path.exists())
 
+    def test_unreadable_new_catalog_does_not_abort_updates_scan(self):
+        pid=self.app.store.import_rows([{'title_zh':'可更新商品','source_url':'https://supplier.example/update-1',
+                                         'supplier':'工厂','facts':'红色盒','stock':3}])['created'][0]
+        self.enable()
+        update=self.box.updates/'stock.csv'
+        update.write_text('工作台SKU,库存数量\n'+self.app.store.get(pid)['partner_sku']+',9\n')
+        old=update.stat().st_mtime-10;os.utime(update,(old,old))
+        original_iterdir=Path.iterdir
+        def fail_new_catalog(path):
+            if path==self.box.folder:raise PermissionError('synthetic unreadable folder')
+            return original_iterdir(path)
+        with patch.object(Path,'iterdir',fail_new_catalog):
+            self.box.tick();self.box.tick()
+        self.assertEqual(self.app.store.get(pid)['stock'],9)
+        self.assertIn('new',self.box.last_error)
+
+    def test_unreadable_photo_sku_folder_does_not_abort_other_sku(self):
+        self.enable()
+        broken=self.box.photos/'BROKEN-SKU';good=self.box.photos/'GOOD-SKU'
+        broken.mkdir();good.mkdir()
+        (broken/'01.jpg').write_bytes(b'broken-folder fixture')
+        (good/'01.jpg').write_bytes(b'good-folder fixture')
+        original_iterdir=Path.iterdir
+        def fail_broken_photo_folder(path):
+            if path==broken:raise PermissionError('synthetic unreadable SKU folder')
+            return original_iterdir(path)
+        with patch.object(Path,'iterdir',fail_broken_photo_folder),patch.object(self.box,'check_photo') as check:
+            self.box.tick()
+        self.assertEqual([call.args[0] for call in check.call_args_list],[good/'01.jpg'])
+        self.assertEqual(self.box.scan_progress['photos'],{'checked':1,'total':1})
+        self.assertIn('原图 BROKEN-SKU',self.box.last_error)
+
     def test_partial_file_reports_skipped_rows_and_never_repeats(self):
         self.enable();self.put('mixed.csv',CSV+',https://detail.1688.com/offer/2.html,R2,工厂,红盒\n')
         self.scan();s=self.box.state()['files'][0]
@@ -59,6 +94,120 @@ class SourceInboxTests(unittest.TestCase):
         self.assertEqual(s['result']['created'],1)
         self.assertEqual(s['result']['skipped'],1)
         self.scan();self.assertEqual(len(self.app.store.list()),1)
+
+    def test_cross_batch_identity_conflicts_and_all_issue_rows_survive_restart(self):
+        self.enable()
+        output=io.StringIO(newline='');writer=csv.writer(output)
+        writer.writerow(['商品名称','货源链接','规格货号','供应商','规格事实','采购成本（人民币元）'])
+        rows=[]
+        for number in range(1,5001):
+            rows.append([f'商品{number}',f'https://detail.1688.com/offer/{number}.html',f'S{number}','工厂','款式A','12'])
+        rows[0]=['重复商品','https://detail.1688.com/offer/1.html','S1','工厂','款式A','12']
+        rows[499]=list(rows[0])
+        rows[500]=['冲突商品甲','https://detail.1688.com/offer/9000.html','CONFLICT','工厂','款式A','12']
+        rows[501]=['冲突商品乙','https://detail.1688.com/offer/9000.html','CONFLICT','工厂','款式B','12']
+        for index in (9,19,29,39,49,59,69,79):rows[index][5]='不是价格'
+        writer.writerows(rows);content=output.getvalue()
+        source=Path(self.tmp.name)/'supplier.csv';source.write_text(content)
+        old=source.stat().st_mtime-10;os.utime(source,(old,old))
+        deposited=self.box.deposit(source,'supplier.csv','new')
+        digest=deposited['digest']
+        catalog_path=self.box.folder/deposited['name']
+        old=catalog_path.stat().st_mtime-10;os.utime(catalog_path,(old,old))
+        self.box.tick();self.box.tick()
+        self.assertEqual(len(self.app.store.list()),4989)
+        receipt=self.box.file_detail(deposited['name'],digest)['result']
+        issues=receipt['issue_rows']
+        self.assertEqual([item['row'] for item in issues],[10,20,30,40,50,60,70,80,500,501,502])
+        self.assertEqual([item['status'] for item in issues],['blocked']*8+['duplicate','blocked','blocked'])
+        self.assertIn('采购成本',issues[0]['reason'])
+        self.assertEqual(len(receipt['issue_examples']),5)
+        self.assertTrue(receipt['mapping_complete'])
+        restarted=SourceInbox(self.app)
+        reread=restarted.file_detail(deposited['name'],digest)['result']
+        self.assertEqual(reread['issue_rows'],issues)
+
+    def test_large_catalog_restart_reuses_committed_batch_receipt(self):
+        self.enable()
+        output=io.StringIO(newline='');writer=csv.writer(output)
+        writer.writerow(['商品名称','货源链接','规格货号','供应商','规格事实'])
+        writer.writerows([[f'商品{n}',f'https://detail.1688.com/offer/{n}.html',f'S{n}','工厂','款式A'] for n in range(1,502)])
+        content=output.getvalue();path=self.put('resume.csv',content)
+        config={'enabled':1,'translate':0,'review':0}
+        original_record=self.box.record
+        def interrupt_after_first_batch(name,digest,status,message,result=None):
+            original_record(name,digest,status,message,result)
+            if status=='processing' and message.startswith('已处理 1/2 批'):
+                raise RuntimeError('simulated process termination after batch receipt')
+        with patch.object(self.box,'record',side_effect=interrupt_after_first_batch):
+            with self.assertRaisesRegex(RuntimeError,'simulated process termination'):
+                self.box.process_large_catalog('resume.csv',hashlib.sha256(content.encode()).hexdigest(),'.csv',content,config)
+        self.assertEqual(len(self.app.store.list()),500)
+        with self.app.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM ops_requests WHERE key LIKE 'source-import:%'").fetchone()[0],1)
+        restarted=SourceInbox(self.app)
+        restarted.check_file(path,config)
+        restarted.check_file(path,config)
+        self.assertEqual(len(self.app.store.list()),501)
+        record=restarted.file_detail('resume.csv',hashlib.sha256(content.encode()).hexdigest())
+        self.assertEqual(record['status'],'done')
+        self.assertEqual(record['result']['cataloged'],501)
+        with self.app.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM ops_requests WHERE key LIKE 'source-import:%'").fetchone()[0],2)
+
+    def test_large_supply_updates_keep_zero_blank_and_cross_batch_duplicate_contract(self):
+        products=self.app.store.import_rows([{'title_zh':f'商品{n}','cost_cny':10,'stock':7} for n in range(1,501)])['created']
+        saved=[self.app.store.get(pid) for pid in products]
+        output=io.StringIO(newline='');writer=csv.writer(output)
+        writer.writerow(['工作台SKU','采购成本（人民币元）','库存数量'])
+        rows=[[p['partner_sku'],'12','5'] for p in saved]
+        rows[0]=[saved[0]['partner_sku'],'',0]
+        rows[1]=[saved[1]['partner_sku'],0,'']
+        rows[2]=[saved[2]['partner_sku'],'','']
+        rows[3]=[saved[3]['partner_sku'],'13','4']
+        rows.append([saved[3]['partner_sku'],'14','9'])
+        writer.writerows(rows);content=output.getvalue();digest=hashlib.sha256(content.encode()).hexdigest()
+        self.assertTrue(self.box.process_large_updates('updates/bulk.csv',digest,'.csv',content))
+        self.assertEqual(self.app.store.get(products[0])['cost_cny'],10)
+        self.assertEqual(self.app.store.get(products[0])['stock'],0)
+        self.assertEqual(self.app.store.get(products[1])['cost_cny'],0)
+        self.assertEqual(self.app.store.get(products[1])['stock'],7)
+        self.assertEqual(self.app.store.get(products[2])['revision'],1)
+        self.assertEqual(self.app.store.get(products[3])['revision'],1)
+        receipt=self.box.file_detail('updates/bulk.csv',digest)['result']
+        self.assertEqual((receipt['updated'],receipt['skipped']),(498,3))
+        self.assertEqual([item['row'] for item in receipt['issue_rows']],[3,4,501])
+        self.assertEqual([item['status'] for item in receipt['issue_rows']],['blocked','blocked','blocked'])
+
+    def test_large_supply_update_restart_does_not_apply_committed_batch_twice(self):
+        products=self.app.store.import_rows([{'title_zh':f'商品{n}','stock':1} for n in range(1,501)])['created']
+        saved=[self.app.store.get(pid) for pid in products]
+        output=io.StringIO(newline='');writer=csv.writer(output)
+        writer.writerow(['工作台SKU','库存数量'])
+        rows=[[p['partner_sku'],8] for p in saved]
+        rows.append([saved[0]['partner_sku'],9])
+        writer.writerows(rows);content=output.getvalue()
+        path=self.box.updates/'resume.csv';path.write_text(content)
+        old=path.stat().st_mtime-10;os.utime(path,(old,old))
+        digest=hashlib.sha256(content.encode()).hexdigest()
+        original_record=self.box.record
+        def interrupt_after_first_batch(name,file_digest,status,message,result=None):
+            original_record(name,file_digest,status,message,result)
+            if status=='processing' and message.startswith('已处理 1/2 批'):
+                raise RuntimeError('simulated process termination after update commit')
+        with patch.object(self.box,'record',side_effect=interrupt_after_first_batch):
+            with self.assertRaisesRegex(RuntimeError,'simulated process termination'):
+                self.box.process_large_updates('updates/resume.csv',digest,'.csv',content)
+        changed=[p for p in products if self.app.store.get(p)['revision']==2]
+        self.assertEqual(len(changed),499)
+        restarted=SourceInbox(self.app)
+        config={'enabled':1,'translate':0,'review':0}
+        restarted.check_file(path,config,'updates')
+        restarted.check_file(path,config,'updates')
+        self.assertEqual([self.app.store.get(pid)['revision'] for pid in products],[1]+[2]*499)
+        receipt=restarted.file_detail('updates/resume.csv',digest)
+        self.assertEqual(receipt['status'],'done')
+        self.assertEqual((receipt['result']['updated'],receipt['result']['unchanged'],receipt['result']['skipped']),(0,499,2))
 
     def test_processing_option_creates_one_existing_workflow(self):
         self.enable(translate=True,review=True);self.put('supplier.csv',CSV)
@@ -143,11 +292,13 @@ class SourceInboxTests(unittest.TestCase):
             with sqlite3.connect(self.app.store.db) as source,sqlite3.connect(old_db) as target:source.backup(target)
             with sqlite3.connect(old_db) as c:
                 c.execute('DROP TABLE source_inbox_config');c.execute('DROP TABLE source_inbox_files')
+                c.execute('DROP TABLE runtime_state')
             legacy=Recovery(old);archive=legacy.create()
             self.app.recovery.validate(legacy.archive_path(archive['id']),dest)
             with sqlite3.connect(Path(dest)/'workbench.sqlite3') as c:
                 self.assertEqual(c.execute('SELECT count(*) FROM products').fetchone()[0],1)
                 self.assertEqual(c.execute('SELECT enabled FROM source_inbox_config').fetchone()[0],0)
+                self.assertEqual(c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='runtime_state'").fetchone()[0],1)
 
 
 if __name__=='__main__':unittest.main()
