@@ -7,7 +7,7 @@ noon 提交与回读 → 有效可售 → 订单履约与结算的可追踪闭�
 | 优先级 | 工作 | 完成证据 |
 | --- | --- | --- |
 | P0 | 修复首次全量测试发现的42项失败/报错；逐项区分缺陷与旧契约测试 | 2026-10-04最新全量：443项业务测试、服务器持久化重启和完整真实Chromium检查通过；逐轮结果见 `docs/VERIFICATION.md` |
-| P0 | Linux/云端环境与 CI 首次运行 | 旧 main 提交 `f2ac7bac4b47a7f603ec9e38d8666a197fa5f58d` 的 GitHub Actions backend/browser 与 main 云端基线曾通过，但不能代表当前源码。最新公开 PR #2 run `37104381778`（head `60055827eeac6e31c16e1bd0461c1531cf084741`）的 setup、隔离服务重启与 Chromium job成功，旧版373项 backend suite仍有24 failures/16 errors；当前本机工作树的443项与 Chromium 检查通过，但尚未在 Linux 上跑。须将审查后的当前源码送入 review branch 后重验完整 Ubuntu backend/browser 两个 job；详见 `docs/VERIFICATION.md` |
+| P0 | Linux/云端环境与 CI 首次运行 | 新PR提交 `1262ebb7f3e961265ccc5a0c222613645ee24490` 的 Ubuntu 24.04 backend job已通过443项测试（93.112秒）与隔离服务重启；同一run的真实 Chromium在smoke夹具调用`.venv/bin/python`、而browser job仅提供系统`python`时失败。工作树已统一使用 `NOON_PYTHON` 解释器选择器，本机同一路径 smoke 与完整443项检查通过；须等下一轮Ubuntu browser job实跑该修复后才算P0通过。旧提交和完整记录见 `docs/VERIFICATION.md` |
 | P1 | 调度器可控时间、事件唤醒与到期扫描 | 2026-10-04：假时钟覆盖到期扫描、等待/审批重试唤醒、模型路由变更唤醒；关闭重开不重复执行。剩余外部调用断电/不确定回执由下一项单独验收。详见 `docs/VERIFICATION.md` |
 | P1 | 外部调用幂等与不确定回执对账 | 2026-10-04：覆盖真实子进程强杀恢复；按 Noon 官方 429 头解析有界等待秒数/请求编号并持久化 project 冷却时间，冷却期拦截后续 API 任务且不重试，应用及服务进程重启后仍有效。新增混合结果批次隔离与同请求重放不重发回归；不确定回执仍需对账。专项 13 项通过；全量检查结果见 `docs/VERIFICATION.md`。仍缺真实 Noon 账号回读、店铺级限流观测及生产主机断电验收。 |
 | P1 | 5000行货源投递与跨批去重、身份矛盾隔离 | 2026-10-04：临时CSV经投递与扫描精确处理5000行/10批；11条异常完整保存且可在Chromium历史页下载。新商品与501行供货更新均注入首批提交后中断并重建处理器，验证安全复用；供货更新验证空白保留、0清零。新商品目录不可读时供货更新仍处理，单个原图 SKU 目录不可读时其它 SKU 继续扫描（16项投递箱专项）。均为合成供应商数据，不代表1688授权或真实商品采集。详见 `docs/VERIFICATION.md` |

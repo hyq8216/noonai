@@ -6,6 +6,7 @@ const { spawn, spawnSync } = require('node:child_process');
 
 (async () => {
   const root = path.resolve(__dirname, '../..');
+  const pythonExe = process.env.NOON_PYTHON || path.join(root, '.venv/bin/python');
   const preparedBrowsers = path.resolve(root, '../.noonai-assets/playwright');
   const browserCache = fs.existsSync(preparedBrowsers) ? preparedBrowsers : path.join(root, '.cloud-runtime/cache/playwright');
   if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(browserCache)) {
@@ -14,7 +15,7 @@ const { spawn, spawnSync } = require('node:child_process');
   const { chromium } = require('playwright');
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'noonai-browser-'));
   const ready = path.join(data, 'ready.json');
-  const seededBudget = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+  const seededBudget = spawnSync(pythonExe, ['-c', `
 import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1]+'/workbench')
@@ -30,7 +31,7 @@ with store.connect() as c:
   assert.equal(seededBudget.status, 0, seededBudget.stderr);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(NOON_|OPENAI_|TEXT_|IMAGE_HOST_)/.test(key)));
-  const server = spawn(process.env.NOON_PYTHON || path.join(root, '.venv/bin/python'),
+  const server = spawn(pythonExe,
     [path.join(root, 'workbench/server.py'), '--data', data, '--port', '0', '--ready-file', ready],
     { env, stdio: ['ignore', 'ignore', 'pipe'] });
   let logs = '';
@@ -45,7 +46,7 @@ with store.connect() as c:
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     const { url } = JSON.parse(fs.readFileSync(ready));
-    const seededCatalog = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+    const seededCatalog = spawnSync(pythonExe, ['-c', `
 import json,sys,time,tracemalloc
 from pathlib import Path
 sys.path.insert(0,sys.argv[1]+'/workbench')
@@ -95,7 +96,7 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
     assert.equal(backendMetrics.rows, 10000);
     assert.equal(backendMetrics.unchanged_payload_keys.includes('products'), false);
     assert.equal(backendMetrics.one_product_delta_count, 1);
-    const photoBytes = spawnSync(path.join(root, '.venv/bin/python'), ['-c',
+    const photoBytes = spawnSync(pythonExe, ['-c',
       "from PIL import Image;import io,base64;f=io.BytesIO();Image.new('RGB',(400,400),'#4080c0').save(f,format='PNG');print(base64.b64encode(f.getvalue()).decode())"
     ], {encoding:'utf8'});
     assert.equal(photoBytes.status, 0, photoBytes.stderr);
@@ -166,7 +167,7 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
         catalogPaginationPassed = true;
       }
       if (view === 'batch') {
-        const before = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+        const before = spawnSync(pythonExe, ['-c', `
 import sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3')
 print('%s|%s'%(db.execute('SELECT count(*) FROM automation_runs').fetchone()[0],db.execute('SELECT count(*) FROM model_calls').fetchone()[0]))
@@ -181,7 +182,7 @@ print('%s|%s'%(db.execute('SELECT count(*) FROM automation_runs').fetchone()[0],
         await page.getByText(/预计文字调用 0 次.*预览没有调用模型/).waitFor();
         assert.equal(await page.locator('#campaign-apply').isDisabled(), true,
           'a campaign with no eligible items must not be schedulable');
-        const unchanged = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+        const unchanged = spawnSync(pythonExe, ['-c', `
 import sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3')
 print('%s|%s'%(db.execute('SELECT count(*) FROM automation_runs').fetchone()[0],db.execute('SELECT count(*) FROM model_calls').fetchone()[0]))
@@ -214,7 +215,7 @@ print('%s|%s'%(db.execute('SELECT count(*) FROM automation_runs').fetchone()[0],
         await page.locator('#photo-import').click();
         await page.getByText('已保存原图并关联商品').waitFor({timeout:10000});
         await page.getByText('NO-SUCH-SKU.png', {exact:true}).waitFor();
-        const photoReadback = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+        const photoReadback = spawnSync(pythonExe, ['-c', `
 import json,sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3')
 rows=[json.loads(r[0]) for r in db.execute("SELECT data FROM media_assets WHERE json_extract(data,'$.kind')='image'")]
@@ -326,7 +327,7 @@ print('linked|rights-recorded|one-asset')
       return response.json();
     }, token);
     const productId = imported.created[0];
-    const seeded = spawnSync(path.join(root, '.venv/bin/python'), ['-c',
+    const seeded = spawnSync(pythonExe, ['-c',
       "import sys;sys.path.insert(0,sys.argv[1]+'/workbench');from core import Store;s=Store(sys.argv[2]);p=s.get(sys.argv[3]);j=s.add_job(p['id'],'submit',p['revision']);s.job_result(j,'uncertain','synthetic browser smoke receipt');print(j)",
       root, data, productId], {encoding:'utf8'});
     assert.equal(seeded.status, 0, seeded.stderr);
@@ -340,12 +341,12 @@ print('linked|rights-recorded|one-asset')
     await page.getByText('已记录人工核对结果；重试仍需操作员重新安排').waitFor();
     await page.getByText('人工核对已记录 · 确认未找到').waitFor();
     assert.equal(await page.locator('form[data-submit-reconcile]').count(), 0, 'resolved row must not offer duplicate reconciliation');
-    const verified = spawnSync(path.join(root, '.venv/bin/python'), ['-c',
+    const verified = spawnSync(pythonExe, ['-c',
       "import sys;sys.path.insert(0,sys.argv[1]+'/workbench');from core import Store;s=Store(sys.argv[2]);c=s.connect();r=c.execute('SELECT outcome FROM submit_reconciliations').fetchone();j=c.execute(\"SELECT status FROM jobs WHERE id=(SELECT job_id FROM submit_reconciliations)\").fetchone();print(r[0]+'|'+j[0]);c.close()",
       root, data], {encoding:'utf8'});
     assert.equal(verified.status, 0, verified.stderr);
     assert.equal(verified.stdout.trim(), 'absent|uncertain', 'reconciliation must be durable and must not rewrite the external job outcome');
-    const catalog = spawnSync(path.join(root, '.venv/bin/python'), ['-c', `
+    const catalog = spawnSync(pythonExe, ['-c', `
 import csv,hashlib,io,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1]+'/workbench')
