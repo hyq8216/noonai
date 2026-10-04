@@ -7,6 +7,34 @@ const { spawn, spawnSync } = require('node:child_process');
 (async () => {
   const root = path.resolve(__dirname, '../..');
   const pythonExe = process.env.NOON_PYTHON || path.join(root, '.venv/bin/python');
+  const fakeCodexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'noonai-fake-codex-'));
+  const fakeCodex = path.join(fakeCodexDir, 'codex');
+  fs.writeFileSync(fakeCodex, `#!${pythonExe}\n${String.raw`
+import json,sys,time
+content={'title_en':'Synthetic black storage clips','description_en':'Black plastic storage clips.','title_ar':'مشابك تخزين سوداء','description_ar':'مشابك تخزين بلاستيكية سوداء','warnings':[]}
+def send(value): print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ d=json.loads(line);method=d.get('method');params=d.get('params',{});rid=d.get('id')
+ if rid is None: continue
+ if method=='config/read': result={'config':{'mcp_servers':{},'model_provider':'openai'}}
+ elif method=='account/read': result={'account':{'type':'chatgpt','planType':'fixture'}}
+ elif method=='modelProvider/capabilities/read': result={'imageGeneration':False}
+ elif method=='model/list': result={'data':[{'model':'gpt-6-luna','displayName':'Fixture Luna'}]}
+ elif method=='account/rateLimits/read': result={'rateLimitsByLimitId':{'codex':{'primary':{'usedPercent':1,'resetsAt':int(time.time())+600,'windowDurationMins':300}}}}
+ elif method=='thread/start': result={'thread':{'id':'browser-fixture-thread'},'model':params['model']}
+ elif method=='turn/start':
+  send({'id':rid,'result':{'turn':{'id':'browser-fixture-turn','status':'inProgress'}}})
+  schema=params['outputSchema']['properties']
+  output={'passed':True,'warnings':[]} if 'passed' in schema else content
+  send({'method':'thread/tokenUsage/updated','params':{'threadId':'browser-fixture-thread','turnId':'browser-fixture-turn','tokenUsage':{'last':{'inputTokens':120,'outputTokens':60}}}})
+  send({'method':'item/completed','params':{'threadId':'browser-fixture-thread','turnId':'browser-fixture-turn','item':{'type':'agentMessage','phase':'final_answer','text':json.dumps(output,ensure_ascii=False)}}})
+  send({'method':'turn/completed','params':{'threadId':'browser-fixture-thread','turn':{'id':'browser-fixture-turn','status':'completed'}}})
+  continue
+ else: result={}
+ send({'id':rid,'result':result})
+`}`, {mode:0o700});
+  fs.chmodSync(fakeCodex,0o700);
+  process.env.PATH = `${fakeCodexDir}:${process.env.PATH || ''}`;
   const preparedBrowsers = path.resolve(root, '../.noonai-assets/playwright');
   const browserCache = fs.existsSync(preparedBrowsers) ? preparedBrowsers : path.join(root, '.cloud-runtime/cache/playwright');
   if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(browserCache)) {
@@ -31,6 +59,7 @@ with store.connect() as c:
   assert.equal(seededBudget.status, 0, seededBudget.stderr);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(NOON_|OPENAI_|TEXT_|IMAGE_HOST_)/.test(key)));
+  env.PATH = `${fakeCodexDir}:${env.PATH || ''}`;
   const server = spawn(pythonExe,
     [path.join(root, 'workbench/server.py'), '--data', data, '--port', '0', '--ready-file', ready],
     { env, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -104,6 +133,7 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
     const page = await browser.newPage();
     page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
+    page.on('dialog', dialog => dialog.accept());
     const firstLoadStarted = Date.now();
     await page.goto(url);
     await page.locator('[data-nav="batch"][aria-current="page"]').waitFor();
@@ -113,7 +143,14 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
         await item.locator('xpath=ancestor::section[contains(@class,"nav-group")]//button[contains(@class,"nav-group-toggle")]').click();
       }
       await item.click();
-      await page.locator(`[data-nav="${view}"][aria-current="page"]`).waitFor();
+      try {
+        await page.locator(`[data-nav="${view}"][aria-current="page"]`).waitFor();
+      } catch (error) {
+        const state = await page.evaluate(() => ({active:document.querySelector('.nav-item[aria-current="page"]')?.dataset.nav,
+          expanded:[...document.querySelectorAll('.nav-group-toggle')].filter(el=>el.getAttribute('aria-expanded')==='true').map(el=>el.dataset.navGroup),
+          dirty:window.dirty, heading:document.querySelector('h1')?.textContent}));
+        throw new Error(`${view} navigation failed; state=${JSON.stringify(state)}; ${error.message}`);
+      }
       assert.equal(await item.isVisible(),true,`${view} should be visible in its expanded group`);
       assert.equal(await page.locator('.nav-group-toggle[aria-expanded="true"]').count(),1,`${view} should leave one group expanded`);
     };
@@ -417,8 +454,55 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
       assert.ok(layout.documentWidth<=layout.viewport,`${view} causes horizontal page overflow: ${JSON.stringify(layout)}`);
       assert.equal(layout.activeVisible,true,`${view} active navigation is outside the mobile menu viewport: ${JSON.stringify(layout)}`);
     }
+    const campaignPage = await browser.newPage();
+    campaignPage.setDefaultTimeout(10000);
+    campaignPage.on('pageerror', error => errors.push(error.message));
+    campaignPage.on('dialog', dialog => dialog.accept());
+    await campaignPage.goto(url);
+    await campaignPage.locator('[data-nav="batch"][aria-current="page"]').waitFor();
+    const configureModel = spawnSync(pythonExe, ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1]+'/workbench')
+from core import Store
+from models import Models
+store=Store(Path(sys.argv[2]));models=Models(store)
+profile=models.save({'name':'浏览器离线订阅夹具','provider':'codex-subscription','model':'gpt-6-luna','enabled':True,'daily_calls':10})['id']
+models.route({'role':'primary','profile_id':profile});models.route({'role':'review','profile_id':profile})
+product=next(p for p in store.list() if p['source_sku']=='PERF-09999')
+store.update(product['id'],{'facts':'黑色塑料收纳夹，10件装','supplier':'合成浏览器测试供应商'},product['revision'])
+models.codex.close()
+print('fixture-profile-ready')
+`, root, data], {encoding:'utf8'});
+    assert.equal(configureModel.status,0,`${configureModel.stderr} stdout=${configureModel.stdout}`);
+    await campaignPage.locator('#batch-options [name="review"]').check();
+    await campaignPage.locator('#batch-search').fill('PERF-09999');
+    await campaignPage.locator('#campaign-preview').click();
+    await campaignPage.getByText(/当前筛选 1 件，分为 1 批；可安排 1 件，待补资料或配置 0 件，已有任务 0 件。/).waitFor();
+    await campaignPage.getByText(/预计文字调用 2 次.*预览没有调用模型/).waitFor();
+    assert.equal(await campaignPage.locator('#campaign-apply').isEnabled(),true);
+    await campaignPage.locator('#campaign-apply').click();
+    await campaignPage.locator('[data-nav="automation"][aria-current="page"]').waitFor();
+    await campaignPage.waitForFunction(() => [...document.querySelectorAll('.auto-item')].some(item =>
+      item.innerText.includes('待人工审核') && item.innerText.includes('请打开商品')),{timeout:30000});
+    const workflowReadback = spawnSync(pythonExe, ['-c', `
+import json,sqlite3,sys
+db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3');db.row_factory=sqlite3.Row
+saved=db.execute("SELECT id,data,approved_revision FROM products WHERE json_extract(data,'$.source_sku')='PERF-09999'").fetchone();product=json.loads(saved['data'])
+items=[dict(r) for r in db.execute("SELECT status,step,data FROM automation_items WHERE product_id=?",(saved['id'],))]
+calls=[dict(r) for r in db.execute("SELECT status,usage,profile FROM model_calls WHERE product_id=?",(saved['id'],))]
+assert product['title_en']=='Synthetic black storage clips',product
+assert 'مشابك' in product['title_ar'],product
+assert saved['approved_revision'] is None, saved['approved_revision']
+assert len(calls)==2 and all(c['status']=='done' for c in calls),calls
+assert len(items)==1 and items[0]['status']=='approval' and items[0]['step']==4,items
+assert db.execute('SELECT count(*) FROM jobs WHERE product_id=?',(saved['id'],)).fetchone()[0]==0
+print('translation=done|review=done|workflow=approval|human_approval=required|noon_writes=0')
+`, data], {encoding:'utf8'});
+    assert.equal(workflowReadback.status,0,workflowReadback.stderr);
+    assert.equal(workflowReadback.stdout.trim(),'translation=done|review=done|workflow=approval|human_approval=required|noon_writes=0');
     assert.deepEqual(errors, [], 'uncaught browser JavaScript errors');
-    console.log('PASS real Chromium startup, all 18 grouped navigation destinations on desktop and 390px mobile, no horizontal overflow, read-only bulk campaign preview and no-call guard, stock preview, zero-price and stale-offer warnings, scheduler settings, original photo selection/matching/rights/import with unmatched-row isolation, manual submit reconciliation, cross-batch issue CSV download, and source-lead preview/add/export');
+    console.log('PASS real Chromium startup, all 18 grouped navigation destinations on desktop and 390px mobile, offline catalog campaign apply through bilingual generation and model review to required human-approval hold, no-call preview guard, stock preview, zero-price and stale-offer warnings, scheduler settings, original photo selection/matching/rights/import with unmatched-row isolation, manual submit reconciliation, cross-batch issue CSV download, and source-lead preview/add/export');
   } catch (error) {
     throw new Error(`${error.message}; browser errors: ${JSON.stringify(errors)}; server errors: ${logs}`);
   } finally {
@@ -429,5 +513,7 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
     clearTimeout(shutdownTimer);
     if (server.exitCode === null) { server.kill('SIGKILL'); await exited; }
     fs.rmSync(data, { recursive: true, force: true });
+    fs.rmSync(fakeCodexDir, { recursive: true, force: true });
+    fs.rmSync(fakeCodexDir, { recursive: true, force: true });
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
