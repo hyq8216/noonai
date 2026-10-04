@@ -552,3 +552,9 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 基线：在隔离 worktree `4fa3a853249969a8c4b7f9b28cb194396efdf719` 上重放本轮五个文件变更；没有复制财务文件、数据库或其他当前工作树改动。
 - 验收：`bash scripts/check.sh`退出0，447项业务测试通过（53.052秒）；隔离服务启动、调度、写保护、导入去重、持久化与重启通过；真实 Chromium 完成桌面和390px布局的18个导航入口，无横向溢出，设置页新增断言通过；铺货预检无写入/无模型调用、库存预览、报价警示、图片权利导入、人工提交回执、异常CSV和货源候选池路径通过。10,000 SKU合成数据本次读数：完整快照0.694秒、精确SKU搜索14ms、每页50件分页通过。`node --check workbench/static/app.js`、`node --check scripts/browser/smoke.cjs`及`git diff --check`通过。
 - 边界：这是基于PR最新提交的本机macOS检查；不是GitHub Linux CI、macOS安装包或真实商家验收。提交后应核对对应远端run；没有真实1688采集、Noon店铺上架或Offer回读，`real_noon_verified=false`。
+
+### 2026-10-04 PR #2 1688接入指引远端回归
+
+- PR head `49d8b33297c5e9bed319644cfadeb240efac744c` 对应 GitHub Actions run `37202921745`，workflow conclusion 为 success。
+- Ubuntu backend：447项测试通过（88.533秒）；隔离服务启动、调度、写保护、导入去重、持久化及重启检查通过。Browser job 使用真实 Chromium，通过桌面与390px窄屏18个导航目标、铺货/库存/报价/调度、图片权利导入、提交回执、货源候选池以及新增1688设置断言。
+- 该 CI 仅验收PR提交中的软件和合成数据；不代表 macOS 安装包、真实1688授权调用、Noon店铺上架或 Offer 回读，`real_noon_verified=false`。
