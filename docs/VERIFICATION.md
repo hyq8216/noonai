@@ -483,3 +483,11 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 将`source_inbox_errors`、`submit_reconciliation`和`uncertain_model_retry`加入Ubuntu浏览器作业。它们使用真实本地HTTP/Chromium和临时合成数据，不触碰真实店铺、模型、供应商或银行。
 - 补充前当前本地工作树通过852项业务测试、21项桌面编排测试及本地全量浏览器工作流。更新PR #5分支后，精确提交`c7409f2e2dd4f071ea4e062ca0f2cc32998c30c8`的GitHub Actions push run `37239390585`和PR run `37239393121`均为`success`，两次的backend与browser job均通过。Ubuntu执行了全量业务测试、桌面编排测试、隔离启动/重启、JS语法和浏览器流程，包括本轮补入的三项回归。详见[push run](https://github.com/hyq8216/noonai/actions/runs/37239390585)与[PR run](https://github.com/hyq8216/noonai/actions/runs/37239393121)。
 - 这证明PR当前SHA的Ubuntu CI通过；真实店铺、供应商、模型或银行服务仍未调用。macOS DMG workflow是独立的构建工作流，不纳入此Linux结论。
+
+### 在途提交恢复与服务进程互斥（2026-10-05）
+
+- 对`submit_dispatching`边界做故障注入时，直接在同一Python进程里调用内部`recover_jobs()`会把任务改成`interrupted`，随后原工作线程仍能进入Noon适配器。这种调用绕过了服务的真实启动入口，不符合部署契约；不能据此认定生产入口存在相同并发。
+- 核对真实启动路径发现`start()`先对工作目录`.server.lock`取得非阻塞独占锁，之后才执行备份恢复、创建`App`及其`recover_jobs()`。第二服务实例无法并发恢复第一个实例的活动数据库。
+- 将`smoke.py`扩展为真实子进程验证：首个服务运行时，在临时数据库放入合成`submit_dispatching`任务；第二实例退出并报告已有实例，ready file未创建，任务仍为`running`。首实例退出后再启动，任务按未知回执恢复为`interrupted`。该测试没有创建真实卖家请求，也没有使用工作区经营数据。
+- 定向`.venv/bin/python scripts/smoke.py`通过。最终`bash scripts/check.sh`退出0：852项业务测试72.940秒、21项桌面打包编排测试0.725秒；新增的进程互斥/恢复场景通过，JS语法、隔离启动检查、40个导航入口桌面/窄屏检查以及全量浏览器业务流程通过。浏览器均使用临时合成数据，没有真实卖家或供应商请求。`git diff --check`通过。
+- 本次精确本机工作树通过不替代Ubuntu结果；新的smoke测试随下一次PR提交重新运行Linux CI后再补记远端SHA和Actions结果。

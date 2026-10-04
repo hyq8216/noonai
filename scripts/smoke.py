@@ -10,6 +10,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'workbench'))
+from core import Store
 
 
 def start(data, ready):
@@ -73,14 +75,34 @@ def main():
             call(url, '/api/import', body, state['token'])
             assert len(call(url, '/api/state')['products']) == 1
             identifier = first['created'][0]
+            store = Store(data)
+            product = store.get(identifier)
+            job_id = store.add_job(identifier, 'submit', product['revision'])
+            with store.connect() as connection:
+                connection.execute("UPDATE jobs SET status='running',result=? WHERE id=?",
+                                   (json.dumps({'phase': 'submit_dispatching'}), job_id))
+            second_ready = data / 'second-ready.json'
+            second = subprocess.run([sys.executable, str(ROOT / 'workbench/server.py'),
+                                     '--data', str(data), '--port', '0', '--ready-file', str(second_ready)],
+                                    env={k: v for k, v in os.environ.items()
+                                         if not k.startswith(('NOON_', 'OPENAI_', 'TEXT_', 'IMAGE_HOST_'))},
+                                    capture_output=True, text=True, timeout=10)
+            assert second.returncode != 0 and ('another instance' in second.stderr or '另一个实例打开' in second.stderr), second.stderr
+            assert not second_ready.exists()
+            with store.connect() as connection:
+                status = connection.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+            assert status == 'running', 'a blocked second instance must not recover a live worker'
         finally:
             stop(process)
         process, url = start(data, ready)
         try:
             assert call(url, '/api/state')['products'][0]['id'] == identifier
+            with Store(data).connect() as connection:
+                status = connection.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+            assert status == 'interrupted', 'the next exclusive startup must recover the unverified write as uncertain'
         finally:
             stop(process)
-    print('PASS isolated boot, scheduler, write guard, import deduplication, persistence and restart')
+    print('PASS isolated boot, scheduler, write guard, import deduplication, live-instance exclusion, uncertain-write restart recovery and persistence')
 
 
 if __name__ == '__main__':
