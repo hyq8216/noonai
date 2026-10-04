@@ -351,6 +351,20 @@ class Store:
             changed=c.execute("UPDATE jobs SET result=?,message=?,updated_at=? WHERE id=? AND kind='submit' AND status='running'",
                               (json.dumps({'phase':phase},ensure_ascii=False),message,now(),jid)).rowcount
             if changed!=1:raise Problem('提交任务状态已变化，未发送请求',409)
+    def fail_job_safely(self,jid,message):
+        """Never turn a possibly-sent Noon write into a retryable failure."""
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT kind,status,result FROM jobs WHERE id=?',(jid,)).fetchone()
+            if not row or row['status']!='running':return
+            try:phase=json.loads(row['result'] or '{}').get('phase')
+            except (TypeError,ValueError):phase=None
+            if row['kind']=='submit' and phase!='preflight':
+                status='uncertain'
+                message='Noon提交请求可能已发送，但本地回执保存失败。请先按 SKU 回查，禁止直接重发当前版本'
+            else:status='failed'
+            c.execute('UPDATE jobs SET status=?,message=?,result=NULL,updated_at=? WHERE id=? AND status=\'running\'',
+                      (status,message,now(),jid))
     def recover_jobs(self):
         with self.connect() as c:
             ts=now()

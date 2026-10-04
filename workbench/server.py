@@ -263,9 +263,9 @@ class App:
                 self.store.record_platform(p['id'],{**p['platform'],'content_response':result,'checked_at':now(),'live_verified':False},expected_parent=parent)
                 self.store.job_result(jid,'done','已读取内容审核结果；售价、库存及实际可售仍需验证')
         except Problem as e:
-            self.store.job_result(jid,'failed',str(e))
+            self.store.fail_job_safely(jid,str(e))
         except Exception:
-            self.store.job_result(jid,'failed','任务处理失败，资料已保留。请检查服务配置或图片文件。')
+            self.store.fail_job_safely(jid,'任务处理失败，资料已保留。请检查服务配置或图片文件。')
 
     def run_transfer_batch(self,dispatch):
         """Claim selected jobs, then make one NGS read for all still-current SKUs."""

@@ -136,6 +136,25 @@ class BatchTests(unittest.TestCase):
    # The failed request was a read-only preflight; it did not create an unknown seller write.
    self.assertTrue(self.s.add_job(pid,'submit',p['revision']))
 
+ def test_transient_uncertain_receipt_write_failure_keeps_submit_blocked(self):
+  p=self.approved_submit_product('SUBMIT-UNCERTAIN-RECEIPT-WRITE');pid=p['id'];jid=self.s.add_job(pid,'submit',p['revision'])
+  contract={'attributes':[{'attribute_code':k,'is_mandatory':True,'is_localizable':True,'attribute_type':'ATTRIBUTE_TYPE_TEXT'}
+                          for k in ['product_title','long_description']]}
+  original=self.s.job_result;failed={'value':False}
+  def fail_uncertain_once(job_id,status,message,result=None):
+   if status=='uncertain' and not failed['value']:
+    failed['value']=True;raise OSError('synthetic transient local receipt write failure')
+   return original(job_id,status,message,result)
+  with patch.object(self.app,'config',return_value={'noon_ready':True,'submit_enabled':True}),patch('server.Noon') as noon,patch.object(self.s,'job_result',side_effect=fail_uncertain_once):
+   noon.return_value.attributes.return_value=contract
+   noon.return_value.submit.side_effect=Problem('synthetic timeout after dispatch',502)
+   self.app.run(jid,p,'submit')
+   noon.return_value.submit.assert_called_once()
+  row=next(job for job in self.s.history()['jobs'] if job['id']==jid)
+  self.assertEqual(row['status'],'uncertain')
+  self.assertIn('回查',row['message'])
+  with self.assertRaises(Problem):self.s.add_job(pid,'submit',p['revision'])
+
  def test_recovery_during_read_only_preflight_cannot_cross_submit_boundary(self):
   p=self.approved_submit_product('SUBMIT-RECOVERY-PREFLIGHT');pid=p['id'];jid=self.s.add_job(pid,'submit',p['revision'])
   contract={'attributes':[{'attribute_code':k,'is_mandatory':True,'is_localizable':True,'attribute_type':'ATTRIBUTE_TYPE_TEXT'}
@@ -152,7 +171,7 @@ class BatchTests(unittest.TestCase):
    noon.return_value.attributes.assert_called_once_with('test-category')
    noon.return_value.submit.assert_not_called()
   with self.s.connect() as c:row=c.execute('SELECT status,message FROM jobs WHERE id=?',(jid,)).fetchone()
-  self.assertEqual(row['status'],'failed');self.assertIn('未发送请求',row['message'])
+  self.assertEqual(row['status'],'failed');self.assertIn('Noon商品提交尚未发送',row['message'])
 
  def test_lost_submit_response_after_remote_acceptance_reconciles_without_resend(self):
   p=self.approved_submit_product('SUBMIT-LOST-RESPONSE');pid=p['id'];jid=self.s.add_job(pid,'submit',p['revision'])

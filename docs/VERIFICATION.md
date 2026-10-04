@@ -492,3 +492,10 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 定向`.venv/bin/python scripts/smoke.py`通过。最终`bash scripts/check.sh`退出0：852项业务测试72.940秒、21项桌面打包编排测试0.725秒；新增的进程互斥/恢复场景通过，JS语法、隔离启动检查、40个导航入口桌面/窄屏检查以及全量浏览器业务流程通过。浏览器均使用临时合成数据，没有真实卖家或供应商请求。`git diff --check`通过。
 - GitHub Actions对精确SHA `e1f5e0cf9f922f996abd880cb696200567ce20e2`的push run `37240091910`和PR run `37240095331`均为`success`，两个工作流中的backend、browser jobs全部通过。新增smoke场景包含于backend的隔离启动步骤，并验证了不确定写恢复和进程互斥。详见[push run](https://github.com/hyq8216/noonai/actions/runs/37240091910)与[PR run](https://github.com/hyq8216/noonai/actions/runs/37240095331)。
 - 边界：服务进程互斥证明来自本机临时工作目录与合成任务；Noon写入、真实回执和真实店铺仍未验证，`real_noon_verified=false`。
+
+### 发送请求后的回执写入失败不能降级为可重试失败（2026-10-05）
+
+- 故障注入复现：模拟Noon提交超时（可能已发送），再让第一次本地`job_result(..., 'uncertain')`写入短暂失败。旧异常处理会将任务标成`failed`，且`Store.add_job`允许为同商品/版本创建第二个提交任务；单次复现记录为`status=failed`、`second_job_created=true`。这是可造成重复卖家写入的真实软件缺陷，尽管网络客户端未被重试。
+- 修复：新增`Store.fail_job_safely`，在一个SQLite写事务中读取job持久阶段并决定失败状态。提交仍在`preflight`时可标记`failed`并安全重排；状态已越过预检边界时只能标`uncertain`并提示先按SKU回查；若任务已被其他路径恢复或改写，则不覆盖。若本地数据库仍不能记录异常状态，原`running`行保留，下一次独占启动将其恢复成`interrupted`，继续阻止重发。
+- 新增`test_transient_uncertain_receipt_write_failure_keeps_submit_blocked`，验证超时后首次不确定回执持久化失败会安全落为`uncertain`，并断言相同商品版本不能创建第二提交任务。与限流前置只读预检及重启恢复定向回归共3项通过。
+- 完整`bash scripts/check.sh`第二轮退出0：853项业务测试、21项桌面测试、隔离服务启动/恢复检查及全量本机Chromium浏览器流程通过，包含MV3扩展安装/执行、uncertain Noon提交人工对账和付费模型重试二次确认。首轮全量检查在扩展下载回执完成状态后偶发读不到`filename`而中止；隔离复跑及第二轮全量均通过，列为待留意的浏览器测试时序波动。`git diff --check`通过。对应Ubuntu CI尚待运行；没有真实Noon凭证/账号或外部写入。
