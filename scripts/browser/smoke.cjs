@@ -408,8 +408,14 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
 ` , root, data], {encoding:'utf8'});
     assert.equal(catalog.status, 0, catalog.stderr);
     await navigateTo('import');
-    await page.locator('#source-inbox-query').fill('browser-bulk.csv');
+    const allInboxResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/source-inbox/list' && url.searchParams.get('group') === 'all'
+        && !url.searchParams.get('query');
+    }, {timeout:45000});
     await page.locator('#source-inbox-group').selectOption('all');
+    const allInboxHttp = await allInboxResponse;
+    assert.equal(allInboxHttp.status(),200,await allInboxHttp.text());
     await page.locator('#source-inbox-query').fill('browser-bulk.csv');
     const inboxListingResponse = page.waitForResponse(response => {
       const url = new URL(response.url());
