@@ -408,13 +408,12 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
 ` , root, data], {encoding:'utf8'});
     assert.equal(catalog.status, 0, catalog.stderr);
     await navigateTo('import');
-    await page.evaluate(() => {
-      const form = document.querySelector('#source-inbox-history');
-      form.querySelector('#source-inbox-group').value = 'all';
-      form.querySelector('#source-inbox-query').value = 'browser-bulk.csv';
-      form.requestSubmit();
-    });
-    await page.waitForFunction(() => document.querySelector('#source-inbox-query')?.value === 'browser-bulk.csv');
+    const inboxListingResponse = page.waitForResponse(response =>
+      response.url().includes('/api/state?') && response.url().includes('surface=import'), {timeout:15000});
+    await page.locator('#source-inbox-group').selectOption('all');
+    await page.locator('#source-inbox-query').fill('browser-bulk.csv');
+    await page.locator('#source-inbox-history button').click();
+    assert.equal((await inboxListingResponse).status(),200);
     const inboxReadback = await page.evaluate(async () => (await (await fetch('/api/source-inbox/list?page=0&group=all&kind=all&query=browser-bulk.csv')).json()).files);
     assert.equal(inboxReadback.length, 1, JSON.stringify(inboxReadback));
     await page.locator('[data-source-inbox-detail="browser-bulk.csv"]').waitFor();
