@@ -408,25 +408,28 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
 ` , root, data], {encoding:'utf8'});
     assert.equal(catalog.status, 0, catalog.stderr);
     await navigateTo('import');
-    const allInboxResponse = page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return url.pathname === '/api/source-inbox/list' && url.searchParams.get('group') === 'all'
-        && !url.searchParams.get('query');
-    }, {timeout:45000});
     await page.locator('#source-inbox-group').selectOption('all');
-    const allInboxHttp = await allInboxResponse;
-    assert.equal(allInboxHttp.status(),200,await allInboxHttp.text());
-    await page.locator('#source-inbox-query').fill('browser-bulk.csv');
-    const inboxListingResponse = page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return url.pathname === '/api/source-inbox/list' && url.searchParams.get('query') === 'browser-bulk.csv';
-    }, {timeout:45000});
-    await page.locator('#source-inbox-history button').click();
-    const inboxListingHttp = await inboxListingResponse;
-    assert.equal(inboxListingHttp.status(),200,await inboxListingHttp.text());
-    const filteredInbox = await inboxListingHttp.json();
-    assert.equal(filteredInbox.files.length,1,JSON.stringify(filteredInbox));
-    assert.equal(filteredInbox.files[0].name,'browser-bulk.csv');
+    const inboxHistory = page.locator('#source-inbox-history');
+    const inboxQuery=page.locator('#source-inbox-query');
+    await inboxQuery.fill('browser-bulk.csv');
+    await inboxQuery.press('Enter');
+    const inboxSection=inboxHistory.locator('xpath=ancestor::section[1]');
+    try {
+      await inboxSection.locator('tbody tr').filter({hasText:'browser-bulk.csv'}).waitFor({timeout:20000});
+    } catch (error) {
+      const inboxDiagnostic = await page.evaluate(async () => {
+        const form=document.querySelector('#source-inbox-history');
+        const response=await fetch('/api/source-inbox/list?page=0&group=all&kind=all&query=browser-bulk.csv');
+        const result=await response.json();
+        return {formText:form?.innerText,group:document.querySelector('#source-inbox-group')?.value,
+          query:document.querySelector('#source-inbox-query')?.value,status:response.status,
+          total:result.total,files:result.files?.map(file=>file.name),busy:document.body.getAttribute('aria-busy'),
+          toast:document.querySelector('#toast')?.textContent,handler:form?.onsubmit?.toString(),
+          requests:performance.getEntriesByType('resource').map(entry=>entry.name).filter(name=>name.includes('/api/source-inbox/list'))};
+      });
+      throw new Error(`${error.message}; inbox UI/API=${JSON.stringify(inboxDiagnostic)}`);
+    }
+    assert.equal(await inboxSection.locator('tbody tr').count(),1,'filename search should render only the matching history row');
     const inboxReadback = await page.evaluate(async () => (await (await fetch('/api/source-inbox/list?page=0&group=all&kind=all&query=browser-bulk.csv')).json()).files);
     assert.equal(inboxReadback.length, 1, JSON.stringify(inboxReadback));
     await page.locator('[data-source-inbox-detail="browser-bulk.csv"]').waitFor({timeout:20000});
