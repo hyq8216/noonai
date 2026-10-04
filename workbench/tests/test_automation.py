@@ -27,6 +27,47 @@ class ModelsTests(unittest.TestCase):
     def tearDown(self):self.tmp.cleanup()
     def profile(self,**extra):
         return self.models.save({'name':'QA model','provider':'openai','model':'gpt-6-luna','enabled':True,'api_key':'test-secret-only','input_price':'.1','output_price':'.5','daily_usd':'1',**extra})['id']
+    def test_minimax_subscription_key_billing_and_replay(self):
+        pid=self.profile(provider='minimax-subscription',model='MiniMax-M3',api_key='sk-cp-synthetic-only',daily_calls=1)
+        p=self.models.get(pid)
+        self.assertEqual(p['base_url'],'https://api.minimax.cn/v1')
+        self.assertEqual(p['context_limit'],512000)
+        self.assertEqual(p['daily_usd'],'0')
+        with patch('models.request_json',return_value=response()) as req:
+            result=self.models.call(pid,{'facts':'5 pieces'},'subscription-request')
+            self.assertEqual(result,self.models.call(pid,{'facts':'5 pieces'},'subscription-request'))
+            self.assertEqual(req.call_count,1)
+            self.assertEqual(req.call_args.args[0],'https://api.minimax.cn/v1/chat/completions')
+            self.assertEqual(req.call_args.args[1]['model'],'MiniMax-M3')
+            self.assertEqual(req.call_args.args[2]['Authorization'],'Bearer sk-cp-synthetic-only')
+            with self.assertRaises(Problem):self.models.call(pid,{},'over-limit')
+            self.assertEqual(req.call_count,1)
+        self.assertIsNone(result['estimated_micro'])
+        self.assertEqual(result['billing'],'minimax-subscription')
+        state=self.models.state()
+        self.assertEqual(state['calls'][0]['billing'],'minimax-subscription')
+        self.assertEqual(state['calls'][0]['charged_micro'],0)
+        self.assertNotIn('sk-cp-synthetic-only',json.dumps(state))
+        self.assertEqual((self.models.secrets/(pid+'.key')).stat().st_mode&0o777,0o600)
+        self.models.save({**p,'enabled':False})
+        self.assertEqual((self.models.secrets/(pid+'.key')).read_text(),'sk-cp-synthetic-only')
+
+    def test_minimax_subscription_rejects_wrong_key_host_and_billing_change(self):
+        for extra in ({'api_key':'ordinary-key'},{'base_url':'https://example.com/v1'},{'base_url':'https://api.minimax.cn/anthropic'}):
+            with self.subTest(extra=extra),self.assertRaises(Problem):
+                self.profile(**{'provider':'minimax-subscription','model':'MiniMax-M3','api_key':'sk-cp-synthetic-only',**extra})
+        pid=self.profile(provider='minimax-subscription',model='MiniMax-M3',api_key='sk-cp-synthetic-only')
+        with self.assertRaises(Problem):self.models.save({**self.models.get(pid),'provider':'minimax-cn','input_price':'.1','output_price':'.5','daily_usd':'1'})
+
+    def test_minimax_subscription_timeout_is_uncertain_and_not_replayed(self):
+        pid=self.profile(provider='minimax-subscription',model='MiniMax-M3',api_key='sk-cp-synthetic-only')
+        with patch('models.request_json',side_effect=Problem('timeout sk-cp-synthetic-only',502)) as req:
+            for attempt in range(2):
+                with self.assertRaises(Problem) as err:self.models.call(pid,{},'timeout')
+                self.assertNotIn('sk-cp-synthetic-only',str(err.exception))
+            self.assertEqual(req.call_count,1)
+        self.assertEqual(self.models.state()['calls'][0]['status'],'uncertain')
+
     def test_secret_permissions_no_readback_and_endpoint_change(self):
         pid=self.profile();p=self.models.get(pid)
         raw=json.dumps(self.models.state());self.assertNotIn('test-secret-only',raw)
@@ -158,6 +199,43 @@ class AutomationTests(unittest.TestCase):
         p2=self.product();r2=self.create(p2,{'translate':True});self.tick();new=self.store.update(p2['id'],{'facts':'6 pieces'},p2['revision'])
         with patch('models.request_json') as req:self.tick();req.assert_not_called()
         self.assertEqual(self.item(r2)['status'],'attention');self.assertEqual(self.store.get(p2['id'])['facts'],'6 pieces')
+
+    def test_uncertain_subscription_retry_requires_explicit_duplicate_usage_confirmation(self):
+        profile=self.app.models.save({'name':'QA MiniMax plan','provider':'minimax-subscription','model':'MiniMax-M3',
+            'api_key':'sk-cp-synthetic-only','enabled':True})['id']
+        self.app.models.route({'role':'primary','profile_id':profile})
+        p=self.product();rid=self.create(p,{'translate':True});self.tick()
+        with patch('models.request_json',side_effect=Problem('synthetic timeout after dispatch',502)) as request:
+            self.tick();self.assertEqual(request.call_count,1)
+        item=self.item(rid);self.assertEqual(item['status'],'attention');self.assertEqual(item['attempt'],0)
+        with self.assertRaisesRegex(Problem,'模型步骤已有调用记录'):
+            self.auto.control({'action':'retry','item_id':item['id'],'revision':p['revision']})
+        unchanged=self.item(rid);self.assertEqual((unchanged['status'],unchanged['attempt']),('attention',0))
+        self.assertEqual(self.app.models.state()['calls'][0]['status'],'uncertain')
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM automation_events WHERE item_id=? AND message LIKE '%确认模型步骤已有调用记录%'",(item['id'],)).fetchone()[0],0)
+        self.auto.control({'action':'retry','item_id':item['id'],'revision':self.store.get(p['id'])['revision'],'confirm_model_retry_after_prior_call':True})
+        self.assertEqual(self.item(rid)['attempt'],1)
+        with patch('models.request_json',return_value=response()) as request:
+            self.tick();self.assertEqual(request.call_count,1)
+        self.assertEqual(self.item(rid)['step'],2)
+        self.assertEqual(sorted(x['status'] for x in self.app.models.state()['calls']),['done','uncertain'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM automation_events WHERE item_id=? AND message LIKE '%确认模型步骤已有调用记录%'",(item['id'],)).fetchone()[0],1)
+    def test_completed_model_call_retry_also_requires_duplicate_usage_confirmation(self):
+        self.model();p=self.product();rid=self.create(p,{'translate':True});self.tick()
+        with patch('models.request_json',return_value=response()):self.tick()
+        item=self.item(rid);self.assertEqual(item['step'],2);self.assertEqual(self.app.models.state()['calls'][0]['status'],'done')
+        # Simulate a downstream/operator interruption while the item still points at this completed model step.
+        with self.store.connect() as c:c.execute("UPDATE automation_items SET step=1,status='attention',message='synthetic downstream interruption' WHERE id=?",(item['id'],))
+        item=self.item(rid)
+        with self.assertRaisesRegex(Problem,'模型步骤已有调用记录'):
+            self.auto.control({'action':'retry','item_id':item['id'],'revision':p['revision']})
+        self.assertEqual(self.item(rid)['attempt'],0)
+        self.auto.control({'action':'retry','item_id':item['id'],'revision':self.store.get(p['id'])['revision'],'confirm_model_retry_after_prior_call':True})
+        self.assertEqual(self.item(rid)['attempt'],1)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM automation_events WHERE item_id=? AND message LIKE '%确认模型步骤已有调用记录%'",(item['id'],)).fetchone()[0],1)
     def test_inflight_model_result_does_not_override_concurrent_edit(self):
         self.model();p=self.product();rid=self.create(p,{'translate':True});self.tick()
         def changed(*args):self.store.update(p['id'],{'facts':'6 pieces'},p['revision']);return response()
@@ -166,7 +244,7 @@ class AutomationTests(unittest.TestCase):
     def test_fallback_is_explicit_and_audited(self):
         self.model('primary');fallback=self.model('fallback');p=self.product();rid=self.create(p,{'translate':True});self.tick()
         with patch('models.request_json',side_effect=Problem('service unavailable',502)):self.tick()
-        i=self.item(rid);self.assertEqual(i['status'],'attention');self.auto.control({'action':'retry_fallback','item_id':i['id'],'revision':p['revision']})
+        i=self.item(rid);self.assertEqual(i['status'],'attention');self.auto.control({'action':'retry_fallback','item_id':i['id'],'revision':p['revision'],'confirm_model_retry_after_prior_call':True})
         with patch('models.request_json',return_value=response()):self.tick()
         self.assertEqual(self.item(rid)['step'],2);self.assertEqual(self.app.models.state()['calls'][0]['profile_id'],fallback)
     def test_rate_wait_resumes_without_duplicate_call(self):

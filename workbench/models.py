@@ -18,6 +18,7 @@ from connectors import request_json
 from codex_subscription import CodexSubscription, SubscriptionWait, MODELS
 
 BASES={'openai':'https://api.openai.com/v1','minimax':'https://api.minimax.io/v1','minimax-cn':'https://api.minimax.cn/v1'}
+SUBSCRIPTION_PROVIDERS=('codex-subscription','minimax-subscription')
 CONTENT_FIELDS=('title_en','description_en','title_ar','description_ar')
 class ModelLimit(Problem):
     def __init__(self,message,retry_at):
@@ -122,7 +123,8 @@ class Models:
             calls=[dict(r) for r in c.execute('SELECT id,profile_id,product_id,status,reserved_micro,charged_micro,usage,message,created_at,updated_at,profile FROM model_calls ORDER BY rowid DESC LIMIT 150')]
             for r in calls:
                 r['usage']=json.loads(r['usage']) if r['usage'] else None
-                r['billing']='subscription' if json.loads(r.pop('profile')).get('provider')=='codex-subscription' else 'api'
+                provider=json.loads(r.pop('profile')).get('provider')
+                r['billing']='minimax-subscription' if provider=='minimax-subscription' else 'subscription' if provider=='codex-subscription' else 'api'
             day=now()[:10];totals=[dict(r) for r in c.execute('SELECT profile_id,count(*) AS calls,sum(charged_micro) AS estimated_micro FROM model_calls WHERE created_at>=? GROUP BY profile_id',(day,))]
             terms=[dict(r) for r in c.execute('SELECT id,source,en,ar,revision,updated_at FROM model_terms ORDER BY source_key')]
         return {'profiles':profiles,'routes':routes,'calls':calls,'today':totals,'day_utc':day,'codex':self.codex.state(),'terms':terms}
@@ -174,25 +176,28 @@ class Models:
         matched.sort(key=lambda r:(-len(r['source']),r['source'].casefold()))
         return matched[:30]
     def save(self,b):
-        provider=text(b.get('provider'),'服务商');subscription=provider=='codex-subscription'
-        base='local-codex' if subscription else b.get('base_url') or BASES.get(provider,'')
+        provider=text(b.get('provider'),'服务商');subscription=provider=='codex-subscription';plan=provider in SUBSCRIPTION_PROVIDERS
+        base='local-codex' if subscription else b.get('base_url') or ('https://api.minimax.cn/v1' if provider=='minimax-subscription' else BASES.get(provider,''))
         base=text(base,'服务地址',500).rstrip('/');u=urlsplit(base)
         if not subscription and (u.scheme!='https' or not u.hostname or u.username or u.password or u.query or u.fragment):raise Problem('服务地址必须为不含凭证或查询参数的HTTPS地址')
-        if provider not in (*BASES,'custom','codex-subscription'):raise Problem('服务商不存在')
+        if provider not in (*BASES,'custom',*SUBSCRIPTION_PROVIDERS):raise Problem('服务商不存在')
         if provider in BASES and base!=BASES[provider]:raise Problem('官方服务请使用对应官方地址；其他地址应选择自定义服务')
+        if provider=='minimax-subscription' and base not in ('https://api.minimax.cn/v1','https://api.minimax.io/v1'):raise Problem('MiniMax订阅请填写中国或国际官方OpenAI兼容地址（以/v1结尾）')
         data={'name':text(b.get('name'),'显示名称',80),'provider':provider,'base_url':base,'model':text(b.get('model'),'模型编号',150),
               'enabled':b.get('enabled') is True,'daily_calls':integer(b.get('daily_calls',50),0,10000,'每日调用上限'),
               'rpm':integer(b.get('rpm',10),1,120,'每分钟调用上限'),'max_output_tokens':integer(b.get('max_output_tokens',4000),256,16000,'单次输出上限'),
-              'input_price':'0' if subscription else decimal(b.get('input_price'),'输入估算费率'),'output_price':'0' if subscription else decimal(b.get('output_price'),'输出估算费率'),
-              'daily_usd':'0' if subscription else decimal(b.get('daily_usd',1),'每日估算预算')}
+              'input_price':'0' if plan else decimal(b.get('input_price'),'输入估算费率'),'output_price':'0' if plan else decimal(b.get('output_price'),'输出估算费率'),
+              'daily_usd':'0' if plan else decimal(b.get('daily_usd',1),'每日估算预算')}
+        if provider=='minimax-subscription':data['context_limit']=512000
         if subscription and data['model'] not in MODELS:raise Problem('订阅通道请选择gpt-6-luna或gpt-6-sol')
         key=b.get('api_key','')
         if subscription and key:raise Problem('订阅通道不接收API密钥，请在Codex客户端登录')
         if not isinstance(key,str) or len(key)>8192 or any(ord(ch)<33 or ord(ch)>126 for ch in key):raise Problem('API密钥格式无效')
+        if provider=='minimax-subscription' and key and not key.startswith('sk-cp-'):raise Problem('MiniMax订阅请使用sk-cp-开头的订阅专用Key，普通按量计费Key请另建API配置')
         with self.lock,self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE');pid=b.get('id') or ident();old=self.get(pid,c) if b.get('id') else None
             if old and old['revision']!=b.get('revision'):raise Problem('配置已更新，请刷新后保存',409)
-            if old and (old['provider']=='codex-subscription')!=subscription:raise Problem('订阅和API是不同授权方式，请新建配置，保留原调用记录',409)
+            if old and old['provider']!=provider and (old['provider'] in SUBSCRIPTION_PROVIDERS or plan):raise Problem('订阅和API是不同授权方式，请新建配置，保留原调用记录',409)
             if old and old['base_url']!=base and not key:raise Problem('更换服务地址时需要重新输入该服务的密钥',409)
             path=self.secrets/(pid+'.key')
             if data['enabled'] and not subscription and not(key or path.is_file()):raise Problem('启用模型前请填写API密钥')
@@ -260,8 +265,13 @@ class Models:
             from visual_check_schema import PROMPT as VISUAL_PROMPT
             system=VISUAL_PROMPT
         messages=[{'role':'system','content':system},{'role':'user','content':source_json}]
+        # UTF-8 byte count is a conservative token bound for this text-only payload.
+        # Existing 120KB source cap keeps normal product calls far below 512K.
+        payload_bound=len(json.dumps(messages,ensure_ascii=False).encode())+1024
+        profile=self.get(pid)
+        if profile['provider']=='minimax-subscription' and payload_bound+profile['max_output_tokens']>512000:raise Problem('资料超过512K安全上限，请拆分商品后处理',409)
         with self.lock,self.store.connect() as c:
-            c.execute('BEGIN IMMEDIATE');p=self.get(pid,c);subscription=p['provider']=='codex-subscription'
+            c.execute('BEGIN IMMEDIATE');p=self.get(pid,c);subscription=p['provider']=='codex-subscription';plan=p['provider'] in SUBSCRIPTION_PROVIDERS
             if expected_revision is not None and p['revision']!=expected_revision:raise Problem('模型配置在连接期间已改变，请重试',409)
             digest=hashlib.sha256(json.dumps([p,source,purpose],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
             old=c.execute('SELECT * FROM model_calls WHERE request_key=?',(key,)).fetchone()
@@ -274,7 +284,7 @@ class Models:
             if subscription and codex_session is None:raise Problem('订阅连接尚未建立',409)
             secret='' if subscription else path.read_text()
             # Text-only conservative reservation. Failed/unknown calls retain their reservation.
-            reserved=0 if subscription else cost(len(json.dumps(messages,ensure_ascii=False).encode())+1024,p['max_output_tokens'],p)
+            reserved=0 if plan else cost(len(json.dumps(messages,ensure_ascii=False).encode())+1024,p['max_output_tokens'],p)
             day=now()[:10];count,spent=c.execute('SELECT count(*),coalesce(sum(charged_micro),0) FROM model_calls WHERE profile_id=? AND created_at>=?',(pid,day)).fetchone()
             next_day=(datetime.now(timezone.utc)+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0).isoformat()
             if count>=p['daily_calls']:raise ModelLimit('模型今日调用次数已达上限（UTC日），等待下一日额度',next_day)
@@ -308,16 +318,16 @@ class Models:
                     result=validate(result,len(image_paths)-1)
                 if purpose=='review' and (type(result.get('passed')) is not bool or not isinstance(result.get('warnings'),list) or any(not isinstance(x,str) for x in result['warnings'])):raise Problem('模型复核结果缺少必要字段',502)
                 if purpose=='probe' and result.get('ok') is not True:raise Problem('连接测试未返回预期内容',502)
-            result.update(call_id=cid,profile_id=pid,model=p['model'],usage=usage,estimated_micro=None if subscription else charged,billing='subscription' if subscription else 'api')
+            result.update(call_id=cid,profile_id=pid,model=p['model'],usage=usage,estimated_micro=None if plan else charged,billing='minimax-subscription' if p['provider']=='minimax-subscription' else 'subscription' if subscription else 'api')
             if subscription:result.update(codex_thread_id=response.get('codex_thread_id'),codex_turn_id=response.get('codex_turn_id'))
-            message='已返回；使用ChatGPT订阅额度，非API美元计费' if subscription else '已返回；费用为按配置费率估算'
+            message='已返回；使用MiniMax订阅Key，套餐实际扣减请以平台用量记录为准' if p['provider']=='minimax-subscription' else '已返回；使用ChatGPT订阅额度，非API美元计费' if subscription else '已返回；费用为按配置费率估算'
             with self.store.connect() as c:c.execute("UPDATE model_calls SET status='done',usage=?,charged_micro=?,result=?,message=?,updated_at=? WHERE id=?",(json.dumps(usage),charged,json.dumps(result,ensure_ascii=False),message,now(),cid))
             return result
         except Exception as e:
             message=str(e) if isinstance(e,Problem) else '模型响应无法处理，未修改商品'
             # Defensive redaction even if a future adapter embeds its key in an exception.
             message=message.replace(secret,'[密钥已隐藏]') if secret else message
-            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if subscription else 'failed',json.dumps(usage),charged,message,now(),cid))
+            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if plan else 'failed',json.dumps(usage),charged,message,now(),cid))
             raise Problem(message, e.status if isinstance(e,Problem) else 502)
     def translate(self,p,request_key,role='primary'):
         if not p.get('facts'):raise Problem('先填写规格事实，避免无依据生成',409)

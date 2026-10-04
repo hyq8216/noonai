@@ -41,7 +41,7 @@ class Automation:
     def __init__(self,app,clock=None,monotonic=None):
         self.clock=clock or (lambda:datetime.now(timezone.utc))
         self.monotonic=monotonic or time.monotonic
-        self.app=app;self.store=app.store;self.stop=threading.Event();self.thread=None;self.last_status_scan=None
+        self.app=app;self.store=app.store;self.stop=threading.Event();self.changed=threading.Event();self.thread=None;self.last_status_scan=None
         with self.store.connect() as c:c.executescript('''
         CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,request_key TEXT UNIQUE,digest TEXT NOT NULL,name TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,run_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS automation_items(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,product_id TEXT NOT NULL,revision INTEGER NOT NULL,step INTEGER NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,data TEXT NOT NULL,message TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -58,8 +58,33 @@ class Automation:
         with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='应用关闭时此步被中断，请核对商品和调用记录后重试',updated_at=? WHERE status='processing'",(self.now(),))
         self.thread=threading.Thread(target=self.loop,name='automation',daemon=True);self.thread.start()
     def close(self):
-        self.stop.set()
+        self.stop.set();self.changed.set()
         if self.thread:self.thread.join(timeout=65)
+    def wake(self,approval=False):
+        # Approval only removes the local polling delay. process() still checks
+        # the reviewed product revision before advancing or submitting anything.
+        if approval:
+            with self.store.connect() as c:
+                c.execute("""UPDATE automation_items SET data=json_remove(data,'$.retry_at')
+                    WHERE status='approval' AND EXISTS (
+                    SELECT 1 FROM automation_runs r WHERE r.id=automation_items.run_id
+                    AND r.status IN ('queued','running','attention')
+                    AND json_extract(r.plan,'$.steps[' || automation_items.step || ']')='approval')""")
+        self.changed.set()
+    def next_delay(self):
+        # Idle workspaces sleep; active jobs retain a bounded fallback scan for
+        # child completion or writes made outside the HTTP event path.
+        with self.store.connect() as c:
+            row=c.execute("""SELECT min(CASE WHEN r.run_at>coalesce(json_extract(i.data,'$.retry_at'),'')
+                THEN r.run_at ELSE coalesce(json_extract(i.data,'$.retry_at'),'') END) AS deadline
+                FROM automation_items i JOIN automation_runs r ON r.id=i.run_id
+                WHERE r.status IN ('queued','running','attention')
+                AND i.status IN ('queued','waiting','approval')""").fetchone()
+        deadline=row['deadline']
+        if deadline is None:return 30.0
+        if not deadline:return .05
+        try:return max(.05,min(5.0,(datetime.fromisoformat(deadline.replace('Z','+00:00'))-self.clock()).total_seconds()))
+        except (ValueError,TypeError):return 5.0
     def state(self,page=0,group='all',query='',item_pages='{}',include_detail=True,include_counts=False):
         if not include_detail:
             with self.store.connect() as c:
@@ -172,7 +197,8 @@ class Automation:
     def create(self,b,connection=None):
         if connection is None:
             with self.store.connect() as c:
-                c.execute('BEGIN IMMEDIATE');return self.create(b,connection=c)
+                c.execute('BEGIN IMMEDIATE');result=self.create(b,connection=c)
+            self.wake();return result
         name=text(b.get('name'),'流程名称',80);key=text(b.get('request_id'),'请求编号',100)
         ids,plan=workflow_input(b)
         stamp=b.get('run_at') or self.now()
@@ -210,6 +236,9 @@ class Automation:
         for p in products:c.execute('INSERT INTO automation_items VALUES(?,?,?,?,?,?,?,?,?,?)',(ident(),rid,p['id'],p['revision'],0,'queued',0,'{}','等待开始',ts))
         return {'id':rid}
     def control(self,b):
+        result=self._control(b)
+        self.wake();return result
+    def _control(self,b):
         action=b.get('action')
         with self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -234,6 +263,12 @@ class Automation:
             elif action in ('retry','retry_fallback') and i['status'] in ('attention','approval'):
                 if step=='submit':raise Problem('提交结果可能已到达平台，禁止流程直接重发。请在商品页面回查平台后重新安排。',409)
                 if action=='retry_fallback' and step!='translate':raise Problem('备用模型重试只适用于内容生成步骤')
+                prior_model_call=None
+                if step in ('translate','review'):
+                    previous_key=f"workflow:{i['id']}:{step}:{i['attempt']}"
+                    prior_model_call=c.execute('SELECT id,status FROM model_calls WHERE request_key=?',(previous_key,)).fetchone()
+                    if prior_model_call and b.get('confirm_model_retry_after_prior_call') is not True:
+                        raise Problem('模型步骤已有调用记录；再次重试会发起新的调用，可能再次消耗订阅额度或产生API费用。请明确确认后再重试。',409)
                 p=self.store.unpack(c.execute('SELECT * FROM products WHERE id=?',(i['product_id'],)).fetchone())
                 if p['revision']!=b.get('revision'):raise Problem('商品已更新，请刷新后重试',409)
                 data=json.loads(i['data'])
@@ -254,6 +289,9 @@ class Automation:
                 if action=='retry_fallback':data['translation_role']='fallback'
                 c.execute("UPDATE automation_items SET status='queued',revision=?,attempt=attempt+1,data=?,message='按当前版本重试本步',updated_at=? WHERE id=?",(p['revision'],json.dumps(data),self.now(),i['id']))
                 c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(self.now(),i['run_id']))
+                if prior_model_call:
+                    c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',
+                        (i['id'],step,'queued','操作员确认模型步骤已有调用记录，仍再次发起调用，可能重复消耗额度或费用',self.now()))
             else:raise Problem('此状态不能执行该操作',409)
         return {'id':i['id']}
     def rework_visual(self,b):
@@ -340,11 +378,12 @@ class Automation:
         i['data']=data
     def loop(self):
         while not self.stop.is_set():
+            self.changed.clear()
             try:self.tick()
             except Exception:
                 # Unexpected failures are visible and isolated; never run the same step silently forever.
                 with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='流程执行异常，请检查后重试',updated_at=? WHERE status='processing'",(self.now(),))
-            self.stop.wait(.4)
+            self.changed.wait(self.next_delay())
     def tick(self):
         # Bound each pass and rotate by last update. A waiting item cannot keep
         # thousands of untouched products behind it in a large catalog run.
@@ -375,7 +414,7 @@ class Automation:
             except Problem as e:self.save(i,'attention',str(e))
             except Exception:self.save(i,'attention','此步执行异常，未继续后续步骤；请检查资料和服务配置')
         scan_time=self.monotonic()
-        if self.last_status_scan is not None and scan_time-self.last_status_scan<5:return
+        if not work and self.last_status_scan is not None and scan_time-self.last_status_scan<5:return
         self.last_status_scan=scan_time
         with self.store.connect() as c:
             groups=c.execute("""SELECT r.id,r.status,count(i.id) AS total,

@@ -3,6 +3,10 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import csv
+import hashlib
+import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +63,51 @@ class SourceInboxTests(unittest.TestCase):
         self.assertEqual(s['result']['created'],1)
         self.assertEqual(s['result']['skipped'],1)
         self.scan();self.assertEqual(len(self.app.store.list()),1)
+
+    def test_5000_row_catalog_cross_batch_dedup_conflict_and_replay(self):
+        output=io.StringIO(newline='');writer=csv.writer(output)
+        writer.writerow(['商品名称','货源链接','规格货号','供应商','规格事实','库存数量','采购成本（人民币元）'])
+        def row(sku,title=None,facts=None):
+            return [title or '商品 '+sku,'https://detail.1688.com/offer/'+sku+'.html',sku,'合成工厂',facts or '合成规格',0,'']
+        first_duplicate=row('CROSS-DUP','跨批重复商品','红色；1件')
+        conflict_before=row('CROSS-CONFLICT','冲突商品','蓝色；1件')
+        conflict_after=row('CROSS-CONFLICT','冲突商品','红色；1件')
+        for index in range(1,5001):
+            if index==499:values=conflict_before
+            elif index==500:values=first_duplicate
+            elif index==501:values=first_duplicate
+            elif index==502:values=conflict_after
+            else:values=row('SKU-'+str(index),facts='合成规格 '+str(index))
+            writer.writerow(values)
+        content=output.getvalue();file_digest=hashlib.sha256(content.encode()).hexdigest()
+        extra=io.StringIO(newline='');csv.writer(extra).writerow(row('SKU-OVER'))
+        with self.assertRaisesRegex(Problem,'最多5000行'):
+            self.box.large_source_rows('.csv',content+extra.getvalue())
+        args=('供应商-5000.csv',file_digest,'.csv',content,{'translate':False,'review':False})
+        self.assertTrue(self.box.process_large_catalog(*args))
+        detail=self.box.file_detail(args[0],file_digest);result=detail['result']
+        self.assertEqual((detail['status'],result['batches_done'],result['batches_total']),('done',10,10))
+        self.assertEqual((result['cataloged'],result['skipped'],result['mapping_complete']),(4997,3,True))
+        self.assertEqual(len(result['created_rows']),4997)
+        self.assertEqual(len(self.app.store.list()),4997)
+        products={p['source_sku']:p for p in self.app.store.list()}
+        self.assertIn('CROSS-DUP',products);self.assertNotIn('CROSS-CONFLICT',products)
+        self.assertEqual(products['SKU-1']['stock'],0);self.assertIsNone(products['SKU-1']['cost_cny'])
+        self.assertEqual({item['row'] for item in result['issue_examples']},{499,501,502})
+        self.assertEqual(result['error_row_count'],3)
+        errors={item['row']:item for item in result['error_rows']}
+        self.assertEqual(set(errors),{499,501,502})
+        self.assertEqual(errors[499]['source_sku'],'CROSS-CONFLICT')
+        self.assertEqual(errors[499]['status'],'blocked')
+        self.assertIn('矛盾',errors[499]['reason'])
+        self.assertEqual(errors[501]['status'],'duplicate')
+        self.assertEqual(errors[501]['source_url'],'https://detail.1688.com/offer/CROSS-DUP.html')
+        with self.app.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM ops_requests WHERE key LIKE 'source-import:%'").fetchone()[0],10)
+        self.assertTrue(self.box.process_large_catalog(*args))
+        repeated=self.box.file_detail(args[0],file_digest)['result']
+        self.assertEqual((repeated['cataloged'],repeated['skipped']), (4997,3))
+        self.assertEqual(len(self.app.store.list()),4997)
 
     def test_processing_option_creates_one_existing_workflow(self):
         self.enable(translate=True,review=True);self.put('supplier.csv',CSV)

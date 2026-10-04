@@ -236,3 +236,249 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
   [INSTALL-0.44.0.md](../desktop/INSTALL-0.44.0.md)。本机安装包、环境和数据不提交到公共仓库。
 
 下一步仍沿用全平台路线；本轮导航与分发不是完整真实经营闭环验收。
+
+## MiniMax订阅配置增补（2026-10-03）
+
+用户要求可填写接口、API Key与选择模型的MiniMax订阅菜单。原有MiniMax仅按API费率估算，缺少独立订阅配置和模型菜单；新增`minimax-subscription`，保留原Codex与API配置和历史。
+
+- 系统设置→模型服务→新增模型服务：选择MiniMax Coding Plan / M Plan订阅，预填中国官方OpenAI兼容Base URL，可改为国际官方地址。提供M3、M3.1 Flash Preview、M2.7与自定义模型编号。
+- 订阅专用Key按sk-cp-前缀校验，普通按量Key、非官方地址及Anthropic路径在保存前拒绝。Key独立保存为0600文件，不回显；留空保留原Key。订阅与其他授权通道转换需新建配置。
+- 保存不调用模型；订阅不要求美元费率或每日美元预算，账本标注MiniMax订阅，记录返回token用量，实际扣减仍需平台回读。每天/每分钟调用上限继续执行。
+- 默认M3；文本资料保留120KB上限，额外以UTF-8长度和输出上限保守控制在512000以内。这里控制的是发送资料上限，不是新增服务端512K参数或特定模型别名；未验证真实套餐折扣。
+- 超时或解析异常保留待核对记录，同一请求不重发；版本、幂等、人工批准与noon写入门禁保留。
+
+验证：`.venv/bin/python -m unittest discover -s workbench/tests -p 'test_automation*.py'`36项通过；`bash scripts/check.sh`退出0，822项业务单测、21项桌面单测和28个Chromium流程全部通过。新增浏览器流程覆盖保存、模型选择/自定义、编辑留空Key、密钥不回显、保存无外部调用、390px与Codex字段切换。已刷新当前64904预览并显示订阅菜单，未填写真实Key或发起付费调用。
+
+Mac arm64真实构建、内置运行环境的订阅配置保存/回读、21模块与库存/FFmpeg检查通过；DMG签名结构、只读挂载和安装指引核验通过。增补沿用0.44.0版本号，交付目录`~/Downloads/Noon-Studio-0.44.0-MiniMax/`，不覆盖前一份安装包。DMG SHA256：`519b53891b87ba812ac6a8a4d42efb6b673db596c6fc6f4bf68aa80d51f26662`。本轮未验原生窗口操作、Intel、Apple公证、真实MiniMax用量或真实noon经营。
+
+本地证据（忽略，不提交）：`output/minimax-subscription/`日志与`output/playwright/minimax-subscription.png`。官方协议依据：https://platform.minimax.cn/docs/m-plan/other-tools；模型权限和套餐扣减以账户实际状态为准。
+
+## 批量流程调度与恢复优化（2026-10-03）
+
+本轮按路线图推进“调度器可控时间、事件唤醒与到期扫描”。旧逻辑在最后商品完成后仍可能保留running状态直到五秒汇总窗口；使用原汇总条件运行新增回归复现`running != done`，新逻辑在有处理项的轮次及时汇总。
+
+- 调度线程改为事件等待：空闲30秒回扫，有待执行项按预约/重试时间等待，最长5秒回扫；不是30秒运行一次。新建、恢复、重试与成功的模型配置/自动化HTTP操作唤醒线程。
+- 单件和整批人工审核成功唤醒approval步骤，清除其本地五秒检查延迟；额度等待期限保留。process仍核对商品版本、人工审核、资料和提交配置，唤醒不等于批准或自动重发。
+- 事件在扫描前清理，扫描期间到达的唤醒不会丢失；关闭时唤醒等待线程。processing恢复仍变成attention，不重发未知在途请求。
+- 商品卡片显示下次检查时间及暂停说明；实际运行轮次仍限100件，避免等待商品阻塞新商品。
+
+验证：42项定向自动化回归通过；新增6项覆盖空闲/预约期限、审核不解除额度等待、完成状态及时回读、关闭线程、真实线程从30秒空闲被新任务唤醒、扫描中收到事件不丢失。第一次新测试使用错误的步骤索引，修正为本计划的approval=2/finish=3，保留全部状态和不提前调用断言。
+
+`bash scripts/check.sh`退出0：826业务单测、21桌面单测、28Chromium流程通过；在最后两项线程回归加入后，重新运行全业务单测828项全部通过。另新增`node scripts/browser/scheduler.cjs`通过真实HTTP/Chromium验证预约批次重复请求、暂停/恢复保留未来时间、移动端取消，以及无模型调用；已加入今后的全量检查，总浏览器脚本29个。
+
+Mac arm64真实构建、内置后端21模块/MiniMax配置/库存/FFmpeg检查及DMG只读挂载通过；交付目录`~/Downloads/Noon-Studio-0.44.0-Scheduler/`，沿用0.44.0版本号，不覆盖前一增补包。DMG SHA256：`62b0962f77888923220556dd3a2cd32d89729bebb827dc04e0454ee3f644bda6`。64904临时预览已重启为本轮后端，浏览器加载新前端需刷新；未打开经营数据。
+
+范围：本轮是调度优化，不是完整平台验收；应用关闭/休眠时不运行。未验证真实MiniMax额度、真实卖家写入、原生窗口操作、Intel或Apple公证。忽略的本地日志保存在`output/scheduler-increment/`。
+
+## 跨版本提交回执防重（2026-10-03）
+
+按P1“外部调用幂等与不确定回执对账”复测发现缺口：单件提交队列和批量预检只按
+商品当前revision查找`uncertain`、`needs_attention`、`interrupted`任务。若提交回执未决后编辑
+商品，新revision可绕开检查并再发一次卖家写入，违反未知回执先核对再重试的契约。
+
+修复后，单件任务创建和内容刊登批量预检都会按商品检查所有版本的未知/中断回执，并给出
+按SKU回查、人工核对的提示。后续边界复测发现`needs_attention`同时表示“有有效平台回执但
+内容待改”，若跨版本永久拦截会妨碍修正刊登。因此未知/中断回执跨版本阻止重发；已确认
+回执只阻止同一版本重复请求，编辑后的新版本仍须重新审核才能提交。实际回查及人工核对
+能力仍需卖家账号集成，本次没有把本地状态当成远程证据。
+
+复现与回归：新增测试覆盖旧revision未决后编辑、拦截新revision提交，以及批量预检报告旧
+revision中断回执；还覆盖已确认异常回执同版本防重、改成新版本后允许重新审核并再次排队。
+`.venv/bin/python -m unittest discover -s workbench/tests -p 'test_workbench.py'`27项通过；
+`... -p 'test_platform_batch.py'`14项通过。最终`bash scripts/check.sh`退出0：834项业务
+单测、21项桌面编排单测及29个真实本机Chromium流程通过，包含40页桌面/窄屏
+导航回归；隔离启动、调度、写保护、导入去重与重启检查通过。完整日志：
+`/tmp/noon-inflight-cancel-check.log`。`git diff --check`通过。
+
+范围：这是防止未知回执跨版本盲目重发的本地保护，不是noon真实回执对账或刊登成功验证；
+`real_noon_verified`仍为false。没有调用真实卖家、模型、银行或供应商服务。
+
+### 重启时区分尚未发送与在途提交
+
+复测App启动恢复路径发现，原`recover_jobs`把所有`queued`与`running`任务一律标记为
+`interrupted`。已排队但尚未被执行器领取的提交任务必然未发送，却被提示按SKU回查，并会被
+未知回执门禁挡住，导致安全重排也无法进行。
+
+现在队列里的非视觉检查任务记录为`failed`并明确标注“尚未发送外部请求，可安全重新安排”；
+执行器已领取的任务仍记录为`interrupted`。在途提交提示必须先按SKU回查，旧版商品即使编辑
+成新revision也不能重发。视觉检查任务维持其专用恢复策略：仅由阶段记录证明未发送时自动重排。
+
+新增重启回归分别验证排队提交可用新任务安全重排、执行中断仍需回查；现有视觉检查重启测试
+确认只恢复确定未发送的检查。定向`test_workbench.py`27项和`test_visual_checks.py`11项通过；
+最终`bash scripts/check.sh`退出0，834项业务单测、21项桌面编排单测及29个真实本机Chromium
+流程全部通过，完整日志`/tmp/noon-inflight-cancel-check.log`。隔离启动/重启、写保护与40页
+桌面/窄屏导航流程也通过。测试只使用临时合成数据。
+
+边界：正在执行的请求仍可能在服务端已接收后失联，不能根据本地进程状态猜测。真实回执核对
+依然需要有效noon店铺接入；`real_noon_verified=false`。
+
+### 在途提交的取消竞争
+
+批量刊登的取消操作只会原子取消仍为`queued`的行。新增本机工作线程级别的
+合成回归：在假客户端已进入`submit`后触发取消，返回`cancelled_now=0`且任务仍为`running`；
+让写请求超时后任务变成`uncertain`。再次把相同任务交给worker不会发送第二次请求，假客户端
+调用次数保持1。定向`test_platform_batch.py`14项通过；最终全量检查834项业务、21项桌面及
+29个Chromium流程通过。未访问真实noon账号；记录在`/tmp/noon-inflight-cancel-check.log`。
+
+### 5000行货源投递的错误行下载
+
+依据自动化路线图P1验收补齐大文件导入反馈：5000行批次回执原先只保留最多5条跳过原因，操作者无法整理其余异常行。现在详细回执保存所有跳过行的行号、商品名称、供应商规格货号、货源链接、库存、采购成本、状态和原因；记录列表仍只返回错误总数，避免把全部异常行带入每次列表响应。查看该文件明细后可下载 UTF-8 BOM CSV，公式危险前缀使用既有CSV转义规则处理。
+
+扩展5000行跨批回归验证：4997条归集，3条跨批重复/身份冲突在明细数据中可定位；浏览器以相同导出组件验证错误CSV字段与下载。原有0库存和空成本语义、防重回放不变。定向测试通过；最终`bash scripts/check.sh`退出0：835项业务单测、21项桌面编排测试，40个页面的1440/390px布局检查及30个真实本地Chromium流程全部通过；新增错误行CSV浏览器流程验证UTF-8 BOM、行号、重复原因及0库存字段。全量日志`/tmp/noon-source-error-export-check.log`；`git diff --check`通过。
+
+边界：浏览器自动化使用本地临时合成资料，没有下载或发布到真实noon店铺；CSV是错误行诊断清单，修正后仍需重新投递和人工确认。`real_noon_verified=false`。
+
+### 图片托管 PUT 结果未明后的安全重试
+
+路线图P1外部调用幂等边界补充端到端回归：模拟图片存储已接受确定性对象写入、客户端随后丢失PUT响应。首个托管任务进入异常，商品未回填公网地址；仅在操作者显式重试后建立新任务，先对同一内容哈希URL执行匿名读回。读回与本地原图字节一致时跳过第二次PUT，再绑定地址；商品成图确认和商品审核状态仍保持未通过。该行为使“重试”先对账，再决定是否需要重写，不把上传回执冒充noon可售回执。
+
+`test_workflow_host.py` 8项与`test_image_host.py` 10项定向测试通过。最新全量`bash scripts/check.sh`退出0：836项业务测试、21项桌面测试、40页1440/390px布局检查和30个真实本地Chromium流程全部通过；日志`/tmp/noon-uncertain-upload-check.log`。`git diff --check`通过。
+
+边界：PUT、CDN读回均为故障注入合成协议，无真实存储桶、供应商或noon账号请求；真实公开托管可读性与平台回执仍待授权环境验证，`real_noon_verified=false`。
+
+### 未决 Noon 内容提交的人工回执对账
+
+继续推进路线图P1“外部调用幂等与不确定回执对账”。复测确认任务记录虽提示操作员按 SKU 回查，实际并无入口将回查结论写回；`uncertain`/`interrupted`任务会因此永久挡住再次预检。新增任务历史回查表单和`/api/content-submit-batch/reconcile`接口，要求明确选择“已找到/未找到”、核对说明及确认。找到时必须填 Noon 商品编号，写入人工来源、回查证据和任务revision；任务保持`needs_attention`，并显式保留`live_verified=false`。未找到时写入审计并将原任务标记失败，后续仍须重新预检/审核。不会自动访问店铺或重放卖家请求。
+
+核对请求使用独立request id与内容指纹：相同请求回放返回原receipt，不重复记事件；同key不同资料冲突。商品回执、任务状态、操作请求receipt、审计事件在同一事务提交。旧revision不能覆盖新版本回执。真实浏览器测试发现样式覆盖HTML`hidden`属性，导致未找到分支仍显示平台商品编号；补充表单样式并由Chromium断言隐藏和非必填。
+
+`test_platform_batch.py`17项和真实本机HTTP集成`test_erp_http.py`14项通过，覆盖接收回执幂等、防重复审计、不置可售、未找到分支、审计失败原子回滚及未认证写请求拒绝；Chromium核对表单两分支和载荷通过。最终`bash scripts/check.sh`退出0：840项业务测试、21项桌面测试、31个本机Chromium流程通过；导航覆盖40个入口和1440/390px布局。日志`/tmp/noon-submit-reconcile-final-check.log`；`git diff --check`通过。
+
+边界：此能力只记录操作者在 Noon 卖家中心完成的回查，没有自动读取 Noon，也没有真实卖家店铺测试。`real_noon_verified=false`；人工确认内容已接收仍不证明审核完成、价格库存正确、可购买、产生订单或盈利。回查说明由操作者填写，应按内部审计要求留存可复核证据。
+
+### 内容提交预检限流与渠道目录首屏竞态
+
+继续检查P1外部调用边界时，补齐提交前 Noon 类目属性预检遇到429的隔离回归：该只读请求被限流时任务为`failed`，商品 upsert 调用次数为0；确认之后可以明确重排，不留下“写入结果未知”的状态。未决对账的“未找到”测试也改为直接断言未知回执阻断已解除，避免只依据“没有可提交商品”间接判断。
+
+上一轮全量检查偶发失败于`domestic_sources.cjs`：40页导航后立即添加渠道账号，偶尔渲染出空平台选项。单项重跑通过，确认根因是导航渲染早于`/api/channels/state`返回；添加账号处理器现在会先确保渠道目录已载入再渲染表单。浏览器回归主动清空前端目录状态后打开表单，验证首帧恢复全部四个预期入口。
+
+`test_platform_batch.py`18项、`test_erp_http.py`14项定向通过；最终`bash scripts/check.sh`退出0：841项业务测试、21项桌面测试、31个Chromium流程通过，包含强制目录未载入状态的国内来源录入和40入口桌面/窄屏导航。完整回归通过后，将该竞态浏览器流程连续独立运行5次，5次均通过。日志`/tmp/noon-continuous-regression-check.log`；`git diff --check`通过。
+
+边界：限流与渠道采集都使用合成、本机服务；没有触发真实 Noon 写入，也没有打开1688等商家账号。提交写入发出后超时仍保守标记结果未知，须人工回查，不因本地测试通过推断平台已接收或可售。
+
+### Noon 已接收但客户端丢失提交响应的端到端对账
+
+为加强“外部调用幂等与不确定回执对账”的故障注入，新增完整工作线程级模拟：假 Noon 在 upsert 后先保存远端 SKU 和接收结果，再抛出连接关闭错误，模拟响应丢失。工作台保留`uncertain`且不保存虚假的本地回执；再次执行同一 job 时 worker 因状态不是`queued`而不发请求，upsert调用总数仍为1。操作者录入远端SKU及回查依据后，本地补记该revision的平台接收回执；商品仍为`live_verified=false`，同revision预检也阻止重复提交。
+
+`test_platform_batch.py`19项通过，新增场景验证远端先提交再丢响应、同job重跑不重发、人工回查后恢复本地回执。最新`bash scripts/check.sh`退出0：842项业务测试、21项桌面测试、31个Chromium流程通过。日志`/tmp/noon-remote-accept-lost-response-check.log`；`git diff --check`通过。
+
+边界：远端状态由合成假客户端模拟，不能证明真实 Noon 对应字段或读回行为；没有卖家凭证，也没有外部平台写入。真实内容审核、库存价格和可售状态仍需独立验证，`real_noon_verified=false`。
+
+### 已发生模型调用后的显式重试确认
+
+继续验证自动化路线图中的持久步骤与不确定结果恢复时，发现人工重试 translate/review 会递增
+attempt并创建新request key；即使旧调用已经成功、失败或结果不确定，系统此前都没有在该入口
+要求确认，可能再次消耗 MiniMax/Codex 订阅额度或 API 费用。现在只要同一商品步骤和attempt已有
+模型调用账本记录，后端就返回409并要求显式确认；确认事件写入 automation audit。页面提示涵盖
+“再次重试必然新发起模型调用”和“前次结果/用量可能未核清”，取消确认不会发送第二个请求。
+保护适用于主模型和备用模型重试；无既有调用记录的步骤仍可直接重试。不会自动重发模型调用。
+
+新增单测覆盖订阅超时形成uncertain记录与已成功调用后的流程中断，两种情况均阻止未确认重试；
+确认后使用新attempt，并保留审计记录。HTTP路由测试验证409/200及token认证，真实Chromium本机
+页面测试验证拒绝确认无第二个请求、接受后携带确认标志。`test_automation.py`26项、
+`test_erp_http.py`15项通过。最终`bash scripts/check.sh`退出0：845项业务测试、21项桌面编排测试，
+32个本机Chromium工作流通过；完整日志`/tmp/noon-model-retry-confirmation-check.log`，
+`git diff --check`通过。
+
+边界：模型服务由本地合成profile和故障注入响应模拟；没有使用真实 MiniMax/Codex额度、卖家账号或
+Noon接口。确认仅代表操作者同意再次发起调用，不证明旧调用是否计费或结果是否已被其他流程采用。
+`real_noon_verified=false`。
+
+### 商品详情翻译入口的重启后重复调用确认
+
+复查同一P1幂等边界时发现，上一项保护仅覆盖自动化中心；商品详情里的独立翻译按钮在同版本
+旧任务重启后成为`interrupted`时，仍能直接创建新的翻译任务。现在`Store.add_job`在事务中检查该
+商品/版本既有翻译任务关联的模型调用账本；只要存在任何调用回执，默认拒绝新任务。页面收到409
+后提示可能重复消耗额度，拒绝确认不产生第二个请求；明确确认才创建新任务，并在同一事务写入
+操作事件。商品版本变化后重新翻译仍走正常流程，因为这不是同版本重放。
+
+新增恢复状态单测、真实本机HTTP 409/202测试及Chromium取消/确认测试，使用合成MiniMax配置和调用
+回执，不发真实模型请求。`test_workbench.py`28项、`test_erp_http.py`16项通过；最终
+`bash scripts/check.sh`退出0：847项业务测试、21项桌面测试、32个本机Chromium工作流通过。
+完整日志`/tmp/noon-product-translation-retry-check.log`，`git diff --check`通过。
+
+边界：模型回执和重启由临时本机数据库合成；没有使用真实订阅额度、店铺凭证或Noon接口。
+确认只允许操作员有意新发一次模型调用，不证明此前请求是否计费。`real_noon_verified=false`。
+
+### 图片托管重试的公网回读结果分类
+
+故障注入复查发现，图片托管在PUT前会先检查内容哈希地址，但此前把任意回读失败都当作对象
+不存在并继续PUT。若公网读取超时、返回403/其他HTTP错误，或已有地址内容不匹配，程序可能在
+对象状态不明或冲突时覆盖写入。现在只有明确HTTP 404会产生专用`PublicObjectMissing`结果并允许
+上传；超时、非404 HTTP错误、非图片响应和字节不一致都停止处理，保留商品原地址，不再PUT。
+PUT结果不明后的下一次重试仍先读回同一确定性地址；读回无法确认时不重复写入。
+
+新增HTTP 404/403分类、冲突内容不PUT及“PUT超时后公网读回超时不进行第二次PUT”的故障注入回归。
+`test_image_host.py`12项、`test_workflow_host.py`9项通过；完整`bash scripts/check.sh`退出0：
+850项业务测试、21项桌面测试及32个本机Chromium工作流通过。日志
+`/tmp/noon-host-readback-classification-check.log`；`git diff --check`通过。
+
+边界：对象存储与CDN响应为合成测试，没有访问真实存储桶或Noon。明确404仅允许对内容哈希地址
+尝试同内容上传；最终仍需公网读取逐字节匹配，才会回填商品链接。`real_noon_verified=false`。
+
+### Noon HTTP 传输层单次尝试约束
+
+继续沿刊登不确定回执边界向连接器底层核验：当前 Noon 适配器使用标准 `urllib` 并禁止重定向，
+未挂载自动重试策略。新增传输层回归，分别注入429、503与连接超时，断言每种错误只调用一次
+`open`；307重定向直接拒绝，避免请求及凭证转发到新地址。该契约与应用层“写入回执不明则停止、
+人工核对后再决定”的策略一致。
+
+`test_offer_status.py`8项定向测试通过。最终`bash scripts/check.sh`退出0：851项业务测试、
+21项桌面测试、32个本机Chromium工作流通过；覆盖40个导航入口的桌面和窄屏检查。日志
+`/tmp/noon-noon-transport-single-attempt-check.log`，`git diff --check`通过。
+
+边界：HTTP错误与超时均由合成本地模拟，不连接Noon，不构成真实账号/API可用性验证；
+`real_noon_verified=false`。
+
+### Noon 提交任务的只读预检与写入阶段恢复
+
+补测P1发送前/后断电边界时发现，任务一进入`running`就会在重启时被当成“平台可能收到请求”。
+如果进程实际停在认证或类目属性只读预检阶段，会产生不必要的人工平台回查阻塞。现在提交任务
+领取时原子持久化`preflight`阶段；只读预检完成后、调用`client.submit`之前，先将阶段更新为
+`submit_dispatching`。重启恢复时，`preflight`确定未发商品写请求，标记失败并允许重新预检；
+`submit_dispatching`保持`interrupted`并要求SKU回查。没有新阶段字段的旧版在途任务仍保守保持
+`interrupted`，不会因升级而误判未发送。
+
+重启测试覆盖排队、只读预检、即将提交、旧版无阶段字段四种状态，并断言预检项可重新安排而后两者
+受回查门禁。工作线程故障注入在`client.submit`入口读取数据库，确认写入阶段已先持久化；既有
+响应丢失测试仍验证单次upsert和人工对账。`test_workbench.py`28项与`test_platform_batch.py`19项
+定向通过；最终`bash scripts/check.sh`退出0：851项业务测试、21项桌面测试、32个本机Chromium工作流
+通过，40个入口桌面/窄屏检查通过。日志`/tmp/noon-submit-durable-preflight-phase-check.log`；
+`git diff --check`通过。
+
+边界：Noon登录、类目读取和upsert用本机合成协议，不访问卖家账号。标记`submit_dispatching`代表
+写请求可能即将或已经发出，不代表平台接收；恢复时仍需人工回查，`real_noon_verified=false`。
+
+### Noon 只读预检期间重启的安全恢复
+
+继续检查持久化阶段边界时，补充验证“重启发生在类目属性读取期间”的真实线程时序：工作线程
+先持久化`preflight`，阻塞在只读`attributes`调用时触发恢复，再让只读调用返回。恢复将任务标为
+确定未发送，可重新预检；原工作线程随后尝试写入`submit_dispatching`时因任务不再是`running`
+而停止，Noon `submit`调用次数为零。这样避免把只读中断误标成平台写请求不确定，同时不会让恢复
+竞态越过发送门禁。此前的`submit_dispatching`及旧数据无阶段标记仍需SKU人工回查，不会自动重发。
+
+新增线程级恢复竞态测试，并保留排队/预检/即将写入/旧数据恢复、发送前阶段落盘及远端已接收但
+响应丢失不重发测试。`test_workbench.py`28项、`test_platform_batch.py`20项通过；最终
+`bash scripts/check.sh`退出0：852项业务测试、21项桌面测试通过；Chromium检查覆盖40个导航页面的
+桌面和窄屏布局及32个浏览器工作流，均通过。完整日志`/tmp/noon-submit-preflight-recovery-race-check.log`；
+`git diff --check`通过。
+
+边界：重启竞态由本机线程与合成Noon协议验证，没有访问真实卖家账号或发送Noon写请求；类目属性
+读取为模拟只读调用。`real_noon_verified=false`。
+
+### 2026-10-05 日期漂移回归修复与当前PR延续工作树复测
+
+- 目标工作树：已有管理 worktree `codex/navigation-compact`，HEAD `c66a7999d2c0c0775450ebb09df69c9d768456d2`（在远端0.44.0 PR #5 head之后2个本地提交），并保留既有未提交更改。没有重置、清理或切换这份工作树。
+- 复现：完整回归852项中，`test_shared_order_and_settlement_ledger_with_durable_replay`失败；订单导入使用当前`created_at`参与经营报表日期过滤，测试却固定查`2026-10-03`。在2026-10-05再次独立运行同一测试稳定复现订单数0而断言为1。Noon、结算和账本本身仍保留一笔合成订单。
+- 修复：测试在导入订单后读取其持久化`created_at`日期，并让结算样例和经营报表日期区间共用该日；注释说明订单分析按创建时间筛选。使用已保存订单时间可避免固定日期过期和跨午夜的二次时钟读取。只更正过期测试日期，没有改动生产账务口径。
+- 定向回归：`PYTHONPATH=workbench:workbench/tests .venv/bin/python -m unittest test_erp_http.ERPHTTPTests.test_shared_order_and_settlement_ledger_with_durable_replay -v`最终修复后通过（1项，0.578秒）。
+- 完整回归：`bash scripts/check.sh`最终退出0；852项业务测试70.653秒通过，21项桌面打包编排测试0.737秒通过，隔离启动/调度/写保护/导入幂等/持久化重启通过。JS语法和所有配置的真实Chromium工作流通过；含40个导航页在1440px/390px、MiniMax设置菜单与只读回显、账务/仓储/采购/采集/回执以及多项深度流程。没有真实店铺、供应商、银行或模型请求。
+- `git diff --check`在验证记录更新后通过。工作树其他既有修改和未跟踪项均保留，没有提交或推送。
+- 新发现的独立功能缺口：本机诊断仍报`arabic_layout=false`；对`draw_text(..., 'منتج عالي الجودة', ...)`的隔离调用稳定抛出“当前图片引擎不支持阿文排版”。当前requirements没有`arabic-reshaper`/`python-bidi`，功能仅以错误门禁拒绝，不能生成阿文卖点模板。此项未在本轮改动，列为下一次图片文字排版优先修复；在修复和视觉像素核验前，不声称Mac本地阿文模板可用。
+- 此worktree的852项结果覆盖其本机未提交代码；前次Ubuntu成功run `37128043274`覆盖的仍是PR #5旧head `f2ac7ba`，没有Linux运行证据证明当前`c66a799`及未提交增量。
+
+### Linux CI 覆盖增补（2026-10-05）
+
+- 复核PR #5延续工作树对应的`.github/workflows/verify.yml`时发现，本地`bash scripts/check.sh`已运行、但Ubuntu CI浏览器作业遗漏三个新增流程：大批货源错误行CSV下载、noon不确定提交的人工核对表单、可能重复计费的模型重试确认。
+- 将`source_inbox_errors`、`submit_reconciliation`和`uncertain_model_retry`加入Ubuntu浏览器作业。它们使用真实本地HTTP/Chromium和临时合成数据，不触碰真实店铺、模型、供应商或银行。
+- 当前本地工作树在补充前通过852项业务测试、21项桌面编排测试及28项浏览器工作流；该结果不等于Linux已通过。下一步需将当前PR分支更新后读取GitHub Actions每个job结果，记录精确提交SHA及Linux结果。

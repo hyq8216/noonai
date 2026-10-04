@@ -5,7 +5,7 @@ from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from server import App
 from core import Problem,normalize_image
-from image_host import verify_public
+from image_host import verify_public,PublicObjectMissing
 
 class ImageHostTests(unittest.TestCase):
  def setUp(self):
@@ -38,7 +38,7 @@ class ImageHostTests(unittest.TestCase):
   self.assertEqual(self.h.status('test')['jobs'][0]['status'],'cancelled')
  def test_upload_verify_and_reapproval(self):
   b,r,p=self.queued();client=Mock()
-  with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=[Problem('missing'),None]) as verify:out=self.h.publish(p)
+  with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=[PublicObjectMissing('missing',404),None]) as verify:out=self.h.publish(p)
   client.put_object.assert_called_once();self.assertEqual(verify.call_count,2);kw=client.put_object.call_args.kwargs;self.assertNotIn('ACL',kw);self.assertIn('ContentMD5',kw)
   saved=self.s.get(self.pid);self.assertTrue(saved['images'][0]['public_url'].startswith('https://cdn.example.test/noon-images/'));self.assertFalse(saved['images_verified']);self.assertFalse(saved['reviewed']);self.assertEqual(len(out['images']),1)
  def test_existing_identical_object_skips_upload(self):
@@ -46,10 +46,17 @@ class ImageHostTests(unittest.TestCase):
   with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public'):self.h.publish(p)
   client.put_object.assert_not_called()
  def test_bad_public_result_preserves_product(self):
-  _,_,p=self.queued();old=self.s.get(self.pid)
-  with patch.object(self.h,'client',return_value=Mock()),patch('image_host.verify_public',side_effect=Problem('mismatch')):
+  _,_,p=self.queued();old=self.s.get(self.pid);client=Mock()
+  with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=Problem('mismatch')):
    with self.assertRaises(Problem):self.h.publish(p)
+  client.put_object.assert_not_called()
   self.assertEqual(self.s.get(self.pid)['revision'],old['revision']);self.assertFalse(self.s.get(self.pid)['images'][0]['public_url'])
+ def test_unknown_or_conflicting_public_object_never_triggers_put(self):
+  _,_,p=self.queued();client=Mock()
+  for error in (Problem('public read timeout',502),Problem('HTTP 403',502),Problem('public bytes differ',502)):
+   with self.subTest(error=str(error)),patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=error):
+    with self.assertRaises(Problem):self.h.publish(p)
+  client.put_object.assert_not_called()
  def test_inflight_edit_not_overwritten(self):
   _,_,p=self.queued()
   def edit(*args):self.s.update(self.pid,{'title_zh':'已修改'},p['revision'])
@@ -64,6 +71,14 @@ class ImageHostTests(unittest.TestCase):
    with self.assertRaises(Problem):verify_public('https://example.test/a',b'photo')
    response.read.return_value=b'photo';response.headers={'Content-Type':'text/html'}
    with self.assertRaises(Problem):verify_public('https://example.test/a',b'photo')
+ def test_public_http_404_is_the_only_upload_permitting_readback_result(self):
+  from urllib.error import HTTPError
+  with patch('image_host.build_opener') as opener:
+   opener.return_value.open.side_effect=HTTPError('https://example.test/a',404,'Not Found',{},None)
+   with self.assertRaises(PublicObjectMissing):verify_public('https://example.test/a',b'photo')
+   opener.return_value.open.side_effect=HTTPError('https://example.test/a',403,'Forbidden',{},None)
+   with self.assertRaisesRegex(Problem,'HTTP 403') as forbidden:verify_public('https://example.test/a',b'photo')
+   self.assertNotIsInstance(forbidden.exception,PublicObjectMissing)
  def test_cancel_requires_explicit_batch(self):
   self.queued()
   with self.assertRaises(Problem):self.h.cancel({})

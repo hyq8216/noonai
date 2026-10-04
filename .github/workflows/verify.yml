@@ -88,6 +88,14 @@ jobs:
             node "scripts/browser/${workflow}.cjs"
           done
 
+      - name: Supplier error export and uncertain external-call reconciliation
+        env:
+          NOON_PYTHON: python
+        run: |
+          for workflow in source_inbox_errors submit_reconciliation uncertain_model_retry; do
+            node "scripts/browser/${workflow}.cjs"
+          done
+
       - name: Deepened ERP business workflows
         env:
           NOON_PYTHON: python

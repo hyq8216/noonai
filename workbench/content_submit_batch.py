@@ -5,6 +5,7 @@ single-product worker, so a partial batch can be inspected without replaying
 successful or uncertain writes.
 """
 import json
+import re
 
 from core import Problem, ident, now
 from platform_batch import digest, selection
@@ -47,8 +48,8 @@ class ContentSubmitBatch:
                 reasons.append('当前版本已获得平台提交回执，先回查或修改商品')
             if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND status IN ('queued','running')", (pid,)).fetchone():
                 reasons.append('商品已有处理任务')
-            if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND revision=? AND status IN ('uncertain','needs_attention','interrupted')", (pid,p['revision'])).fetchone():
-                reasons.append('此前提交结果待核对，不能直接重发当前版本')
+            if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND (status IN ('uncertain','interrupted') OR (status='needs_attention' AND revision=?))", (pid,p['revision'])).fetchone():
+                reasons.append('该商品此前提交回执待核对；请按 SKU 回查并完成人工核对，系统不会自动重发')
             rows.append({'id': pid, 'title': p['title_zh'], 'sku': p['partner_sku'], 'revision': p['revision'],
                          'status': 'blocked' if reasons else 'ready', 'reasons': reasons})
         ready = sum(r['status'] == 'ready' for r in rows)
@@ -125,3 +126,62 @@ class ContentSubmitBatch:
                 c.execute("UPDATE jobs SET status='cancelled',message='已取消，未向平台提交本任务',updated_at=? WHERE id=?",(now(),row['id']))
                 self.store.event(c,row['product_id'],'取消批量刊登','尚未执行的内容提交已取消')
         return {**self.status(request_id),'cancelled_now':len(rows)}
+
+    def reconcile(self, body):
+        """Record an operator's explicit Noon readback for an uncertain content write."""
+        if not isinstance(body,dict) or set(body)!={'request_id','job_id','outcome','note','sku_parent','confirmed'}:
+            raise Problem('提交回执核对资料无效')
+        request_id=body['request_id'];job_id=body['job_id'];outcome=body['outcome']
+        note=body['note'];parent=body['sku_parent']
+        if not isinstance(request_id,str) or not request_id.strip() or len(request_id)>100:raise Problem('核对请求编号无效')
+        if not isinstance(job_id,str) or not re.fullmatch(r'[a-f0-9]{32}',job_id):raise Problem('待核对提交任务编号无效')
+        if outcome not in ('accepted','not_found'):raise Problem('请选择平台已接收或未找到')
+        if body['confirmed'] is not True:raise Problem('请确认已按商品SKU回查noon记录')
+        if not isinstance(note,str) or not note.strip() or len(note)>1000 or any(ord(ch)<32 and ch not in '\t\n\r' for ch in note):
+            raise Problem('请填写1000字以内的回查依据')
+        if outcome=='accepted':
+            if not isinstance(parent,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',parent):raise Problem('平台已接收时请填写有效的平台商品编号')
+        elif parent!='':raise Problem('平台未找到时不应填写平台商品编号')
+        fingerprint=digest([job_id,outcome,note.strip(),parent])
+        key='submit-reconcile:'+request_id
+        with self.store.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            old=c.execute('SELECT digest,result FROM ops_requests WHERE key=?',(key,)).fetchone()
+            if old:
+                if old['digest']!=fingerprint:raise Problem('核对请求编号已用于其他资料',409)
+                return {**json.loads(old['result']),'replayed':True}
+            row=c.execute('SELECT id,product_id,revision,status FROM jobs WHERE id=? AND kind=\'submit\'',(job_id,)).fetchone()
+            if not row:raise Problem('noon提交任务不存在',404)
+            if row['status'] not in ('uncertain','interrupted'):raise Problem('只有结果不明或中断的提交任务可以人工核对',409)
+            product=c.execute('SELECT data FROM products WHERE id=?',(row['product_id'],)).fetchone()
+            if not product:raise Problem('提交商品已不存在',409)
+            data=json.loads(product['data']);platform=dict(data.get('platform') or {})
+            previous_revision=platform.get('submitted_revision');previous_parent=platform.get('sku_parent')
+            if type(previous_revision) is int and previous_revision>row['revision']:
+                raise Problem('商品已有更新版本的提交回执，不能用旧任务覆盖',409)
+            if type(previous_revision) is int and previous_revision==row['revision']:
+                if outcome!='accepted' or previous_parent!=parent:
+                    raise Problem('本地已有该版本的平台接收回执，请核对平台商品编号后选择一致的结果',409)
+            checked_at=now()
+            reconciliation={'outcome':outcome,'source':'operator-entered-noon-readback','job_id':job_id,
+                            'job_revision':row['revision'],'sku_parent':parent or None,
+                            'evidence':note.strip(),'checked_at':checked_at}
+            platform['submit_reconciliation']=reconciliation
+            if outcome=='accepted':
+                platform.update(sku_parent=parent,submitted_revision=row['revision'],checked_at=checked_at,live_verified=False)
+                status='needs_attention';message='人工回查确认平台已接收此版本；内容审核、价格、库存与可售状态仍需分别核对'
+                action='人工核对noon提交已接收'
+            else:
+                status='failed';message='人工回查未找到此SKU的提交商品；已记录核对，可重新预检和安排提交'
+                action='人工核对noon未找到提交商品'
+            data['platform']=platform
+            c.execute('UPDATE products SET data=?,updated_at=? WHERE id=?',(json.dumps(data,ensure_ascii=False),checked_at,row['product_id']))
+            receipt={'job_id':job_id,'product_id':row['product_id'],'revision':row['revision'],'outcome':outcome,
+                     'sku_parent':parent or None,'evidence':note.strip(),'checked_at':checked_at,'live_verified':False}
+            c.execute('UPDATE jobs SET status=?,message=?,result=?,updated_at=? WHERE id=? AND status IN (\'uncertain\',\'interrupted\')',
+                      (status,message,json.dumps({'reconciliation':receipt},ensure_ascii=False),checked_at,job_id))
+            self.store.event(c,row['product_id'],action,
+                             f"提交任务 {job_id} · 版本 {row['revision']} · {note.strip()[:800]}")
+            result={'reconciliation':receipt,'job_status':status,'message':message,'replayed':False}
+            c.execute('INSERT INTO ops_requests VALUES(?,?,?)',(key,fingerprint,json.dumps(result,ensure_ascii=False)))
+        return result

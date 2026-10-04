@@ -64,11 +64,77 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(any('示例' in x for x in self.store.get(pid)['issues']))
     def test_persistence_restart_jobs(self):
         p=self.make(); jid=self.store.add_job(p['id'],'translate',p['revision'])
+        with self.store.connect() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
         other=Store(self.tmp.name); other.recover_jobs()
         self.assertEqual(other.get(p['id'])['source_sku'],'BLACK-5'); self.assertEqual(other.history()['jobs'][0]['status'],'interrupted')
+    def test_restart_distinguishes_queued_submit_from_inflight_submit(self):
+        queued=self.make(source_sku='QUEUED')
+        queued_id=self.store.add_job(queued['id'],'submit',queued['revision'])
+        preflight=self.make(source_sku='PREFLIGHT')
+        preflight_id=self.store.add_job(preflight['id'],'submit',preflight['revision'])
+        inflight=self.make(source_sku='INFLIGHT')
+        inflight_id=self.store.add_job(inflight['id'],'submit',inflight['revision'])
+        dispatching=self.make(source_sku='DISPATCHING')
+        dispatching_id=self.store.add_job(dispatching['id'],'submit',dispatching['revision'])
+        with self.store.connect() as c:
+            c.execute("UPDATE jobs SET status='running',result=? WHERE id=?",(json.dumps({'phase':'preflight'}),preflight_id))
+            c.execute("UPDATE jobs SET status='running' WHERE id=?",(inflight_id,)) # legacy running row has no phase marker
+            c.execute("UPDATE jobs SET status='running',result=? WHERE id=?",(json.dumps({'phase':'submit_dispatching'}),dispatching_id))
+        self.store.recover_jobs()
+        with self.store.connect() as c:
+            states={row['id']:dict(row) for row in c.execute('SELECT id,status,message FROM jobs WHERE id IN (?,?,?,?)',(queued_id,preflight_id,inflight_id,dispatching_id))}
+        self.assertEqual(states[queued_id]['status'],'failed')
+        self.assertIn('尚未发送外部请求',states[queued_id]['message'])
+        self.assertEqual(states[preflight_id]['status'],'failed')
+        self.assertIn('只读预检阶段',states[preflight_id]['message'])
+        self.assertEqual(states[inflight_id]['status'],'interrupted')
+        self.assertIn('是否收到请求未知',states[inflight_id]['message'])
+        self.assertEqual(states[dispatching_id]['status'],'interrupted')
+        self.assertTrue(self.store.add_job(queued['id'],'submit',queued['revision']))
+        self.assertTrue(self.store.add_job(preflight['id'],'submit',preflight['revision']))
+        edited=self.store.update(inflight['id'],{'note':'版本修改'},inflight['revision'])
+        with self.assertRaisesRegex(Problem,'回执仍待核对'):
+            self.store.add_job(inflight['id'],'submit',edited['revision'])
+        with self.assertRaisesRegex(Problem,'回执仍待核对'):
+            self.store.add_job(dispatching['id'],'submit',dispatching['revision'])
     def test_one_job_per_product(self):
         p=self.make(); self.store.add_job(p['id'],'translate',p['revision'])
         with self.assertRaises(Problem): self.store.add_job(p['id'],'translate',p['revision'])
+    def test_interrupted_translation_with_model_call_requires_confirmed_new_job(self):
+        from models import Models
+        Models(self.store)
+        p=self.make();old=self.store.add_job(p['id'],'translate',p['revision'])
+        with self.store.connect() as c:
+            c.execute("INSERT INTO model_calls(id,request_key,digest,profile_id,profile,product_id,status,reserved_micro,charged_micro,message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                      ('synthetic-call','product-job:'+old,'digest','profile','{}',p['id'],'uncertain',0,0,'synthetic timeout',now(),now()))
+        self.store.job_result(old,'interrupted','service restart during translation')
+        with self.assertRaisesRegex(Problem,'模型步骤已有调用记录'):
+            self.store.add_job(p['id'],'translate',p['revision'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE product_id=? AND kind='translate'",(p['id'],)).fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT count(*) FROM events WHERE product_id=? AND action='确认重试模型翻译'",(p['id'],)).fetchone()[0],0)
+        retried=self.store.add_job(p['id'],'translate',p['revision'],confirm_model_retry_after_prior_call=True)
+        self.assertNotEqual(retried,old)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM events WHERE product_id=? AND action='确认重试模型翻译'",(p['id'],)).fetchone()[0],1)
+    def test_uncertain_submit_blocks_resubmission_after_product_revision_changes(self):
+        p=self.make(); jid=self.store.add_job(p['id'],'submit',p['revision'])
+        self.store.job_result(jid,'uncertain','synthetic timeout after dispatch')
+        edited=self.store.update(p['id'],{'facts':'修改后的事实'},p['revision'])
+        with self.assertRaisesRegex(Problem,'回执仍待核对'):
+            self.store.add_job(p['id'],'submit',edited['revision'])
+        self.store.job_result(jid,'done','synthetic reconciled receipt')
+        self.assertTrue(self.store.add_job(p['id'],'submit',edited['revision']))
+    def test_known_attention_receipt_blocks_same_revision_but_allows_reviewed_update(self):
+        p=self.complete();p=self.store.approve(p['id'],p['revision']);jid=self.store.add_job(p['id'],'submit',p['revision'])
+        self.store.record_platform(p['id'],{'sku_parent':'SYNTHETIC-PARENT','submitted_revision':p['revision'],'live_verified':False})
+        self.store.job_result(jid,'needs_attention','Synthetic valid receipt with listing issues')
+        with self.assertRaisesRegex(Problem,'回执仍待核对'):
+            self.store.add_job(p['id'],'submit',p['revision'])
+        edited=self.store.update(p['id'],{'note':'已依据明确回执修正'},p['revision'])
+        approved=self.store.approve(edited['id'],edited['revision'])
+        self.assertTrue(approved['reviewed'])
+        self.assertTrue(self.store.add_job(p['id'],'submit',edited['revision']))
     def test_image_and_zip(self):
         # Synthetic geometry only: tests exercise image handling, not a real product edit.
         image=Image.new('RGBA',(800,700),(255,0,0,128)); buf=io.BytesIO(); image.save(buf,'PNG')

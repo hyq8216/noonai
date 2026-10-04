@@ -1,5 +1,6 @@
 import copy,json,unittest
 from unittest.mock import patch,Mock
+from urllib.error import HTTPError,URLError
 import test_video_batch as fixtures
 from core import Problem
 from connectors import Noon,request_json
@@ -31,6 +32,17 @@ class OfferTests(unittest.TestCase):
   n=Noon.__new__(Noon);n.creds={'project_code':'qa'};n.opener=Mock()
   with patch('connectors.request_json',return_value={}) as req:n.offers('A/B ?');self.assertTrue(req.call_args.args[0].endswith('A%2FB%20%3F'));self.assertEqual(req.call_args.kwargs['method'],'GET')
   opener=Mock();result=Mock();result.__enter__=Mock(return_value=result);result.__exit__=Mock();result.read.return_value=b'{}';opener.open.return_value=result;request_json('https://example.test',None,opener=opener,method='GET');req=opener.open.call_args.args[0];self.assertEqual(req.get_method(),'GET');self.assertIsNone(req.data)
+ def test_noon_http_transport_never_retries_failed_writes_or_redirects(self):
+  for failure in (HTTPError('https://example.test/upsert',429,'Too Many Requests',{},None),
+                  HTTPError('https://example.test/upsert',503,'Unavailable',{},None),
+                  URLError(TimeoutError('synthetic timeout'))):
+   with self.subTest(failure=type(failure).__name__),patch('connectors.build_opener') as build:
+    opener=Mock();opener.open.side_effect=failure;build.return_value=opener
+    with self.assertRaises(Problem):request_json('https://example.test/upsert',{'sku':'synthetic'},opener=opener)
+    self.assertEqual(opener.open.call_count,1,'uncertain or failed external writes must not be replayed in the transport layer')
+  from connectors import NoRedirect
+  request=Mock();response=Mock()
+  with self.assertRaises(Problem):NoRedirect().redirect_request(request,response,307,'Temporary Redirect',{},'https://other.example.test/upsert')
  def test_batch_offer_mode_no_parent_replay_and_cancel(self):
   p=self.product();batch=PlatformBatch(self.app,'offers');b={'product_ids':[p['id']],'request_id':'offer','confirmed':True}
   with patch.object(self.app,'config',return_value={'noon_ready':True}),patch.object(self.app.executor,'submit') as submit:

@@ -130,7 +130,7 @@ class SourceInbox:
         files=[]
         for row in rows:
             result=json.loads(row['result'] or '{}')
-            summary_keys=('issue_examples','asset_id','batches_done','batches_total','cataloged','updated','skipped','unchanged')
+            summary_keys=('issue_examples','error_row_count','asset_id','batches_done','batches_total','cataloged','updated','skipped','unchanged')
             files.append({**dict(row),'result':{k:result[k] for k in summary_keys if k in result},'row_count':len(result.get('rows') or [])})
         return {'files':files,'page':page,'pages':pages,'total':total,'group':group,'kind':kind,'query':query.strip()}
 
@@ -646,13 +646,27 @@ class SourceInbox:
         created_rows=[]
         run_ids=[]
         issue_examples=[]
+        error_rows={}
+        def error_row(number,item,status=None,reason=None):
+            values=item.get('values') or {}
+            error_rows[number]={
+                'row':number,'title':item.get('title') or values.get('title_zh',''),
+                'source_sku':values.get('source_sku',''),'source_url':values.get('source_url',''),
+                'stock':values.get('stock'),'cost_cny':values.get('cost_cny'),
+                'status':status or item.get('status','blocked'),
+                'reason':str(reason if reason is not None else item.get('reason','未导入'))[:300],
+            }
         seen_fingerprints=set()
-        for index,(group,_) in enumerate(batches):
+        for index,(group,initial_preview) in enumerate(batches):
             kept=[];original_rows=[]
             for position,raw in enumerate(group,1):
                 number=index*500+position
                 if number in conflicting_rows or number in duplicate_rows:
                     skipped+=1
+                    initial_item=next((item for item in initial_preview['rows'] if item['row']==position),{})
+                    error_row(number,initial_item,'blocked' if number in conflicting_rows else 'duplicate',
+                              '同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
+                              '同一货源与规格在文件中重复，仅保留第一条')
                     if len(issue_examples)<5:
                         issue_examples.append({'row':number,'reason':
                             '同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
@@ -690,11 +704,14 @@ class SourceInbox:
                     created_rows.append({**item,'row':original_rows[position]})
             skipped+=len(kept)-len(result['created'])
             for issue in result.get('skipped',[]):
-                if len(issue_examples)>=5:break
                 position=int(issue.get('row',0))-1
                 if not 0<=position<len(original_rows):continue
-                issue_examples.append({'row':original_rows[position],
-                                       'reason':str(issue.get('reason','未导入'))[:200]})
+                number=original_rows[position]
+                item=next((candidate for candidate in initial_preview['rows']
+                           if candidate['row']==number-index*500),{})
+                error_row(number,item,issue.get('status'),issue.get('reason','未导入'))
+                if len(issue_examples)<5:
+                    issue_examples.append({'row':number,'reason':str(issue.get('reason','未导入'))[:200]})
             queued+=result.get('processing',{}).get('queued',0)
             waiting+=len(result.get('processing',{}).get('waiting',[]))
             run_id=result.get('processing',{}).get('run_id')
@@ -706,6 +723,7 @@ class SourceInbox:
         self.record(name,file_digest,'done' if cataloged else 'attention',message if cataloged else message+'；没有可归集的商品，请核对表头和前几项原因',
                     {'batches_done':total,'batches_total':total,'cataloged':cataloged,'newly_created_this_scan':newly_created,'skipped':skipped,
                      'queued':queued,'waiting':waiting,'run_ids':run_ids,'issue_examples':issue_examples,
+                     'error_rows':[error_rows[row] for row in sorted(error_rows)],'error_row_count':len(error_rows),
                      'created_rows':created_rows,'mapping_complete':len(created_rows)==cataloged})
         return True
 

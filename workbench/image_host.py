@@ -2,6 +2,7 @@
 import base64,hashlib,json,re,threading
 from pathlib import Path
 from urllib.parse import urlsplit,quote
+from urllib.error import HTTPError
 from urllib.request import Request,build_opener
 from core import Problem,ident,now
 from connectors import NoRedirect
@@ -10,6 +11,9 @@ from recovery import write_json
 
 LIMIT=25*1024*1024
 PUBLIC_FIELDS=('endpoint','region','bucket','prefix','public_base','addressing_style')
+
+class PublicObjectMissing(Problem):
+    """The origin explicitly confirmed that this deterministic object is absent."""
 
 def https(value,label):
     if not isinstance(value,str) or len(value)>1000:raise Problem(label+'无效')
@@ -23,8 +27,11 @@ def verify_public(url,raw):
             if r.status!=200 or not r.headers.get('Content-Type','').lower().startswith('image/'):raise Problem('公网地址未返回图片，保留原商品地址',502)
             body=r.read(len(raw)+1)
         if hashlib.sha256(body).digest()!=hashlib.sha256(raw).digest():raise Problem('公网图片与本地成图不一致，保留原商品地址；请关闭托管端图片改写',502)
+    except HTTPError as e:
+        if e.code==404:raise PublicObjectMissing('公网图片对象明确不存在，可以尝试上传',404)
+        raise Problem(f'公网图片读取返回HTTP {e.code}，对象状态未确认，未再次上传',502)
     except Problem:raise
-    except Exception:raise Problem('公网图片读取失败，上传结果需核对，商品地址未更改',502)
+    except Exception:raise Problem('公网图片读取失败，对象状态未确认，未再次上传；请稍后重新核对',502)
 
 class ImageHost:
     def __init__(self,app):
@@ -149,7 +156,7 @@ class ImageHost:
             key=c['prefix']+'/'+h+'.'+Path(im['file']).suffix.lstrip('.');url=c['public_base']+'/'+quote(key,safe='/')
             # Retry after an uncertain upload verifies the deterministic public object before another PUT.
             try:verify_public(url,raw)
-            except Problem:
+            except PublicObjectMissing:
                 try:client.put_object(Bucket=c['bucket'],Key=key,Body=raw,ContentType={'jpg':'image/jpeg','png':'image/png','webp':'image/webp'}[Path(im['file']).suffix[1:]],ContentMD5=base64.b64encode(hashlib.md5(raw).digest()).decode())
                 except Exception:raise Problem('图片上传失败或结果未明；原地址保留。重试会先核对同一内容地址',502)
                 verify_public(url,raw)

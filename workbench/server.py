@@ -175,7 +175,7 @@ class App:
             aid=im.get('media_asset_id')
             if aid:
                 self.visuals.validate_asset(self.media.get(aid),p['id'])
-    def queue(self,pid,kind,revision):
+    def queue(self,pid,kind,revision,confirm_model_retry_after_prior_call=False):
         p=self.store.get(pid)
         config=self.config()
         if kind=='translate' and not config['text_ready']: raise Problem('文字服务尚未接入，请在设置页查看配置方式。双语字段可先手动填写。',409)
@@ -190,13 +190,14 @@ class App:
         if kind=='offers' and p['demo']:raise Problem('示例商品不能读取真实报价',409)
         if kind=='prices' and (p['demo'] or p.get('mode')!='LOCAL'):raise Problem('仅真实且已确认本地模式的商品可读取沙特本地售价',409)
         if kind=='refresh' and not (p.get('platform') or {}).get('sku_parent'): raise Problem('尚无平台商品编号可回查',409)
-        jid=self.store.add_job(pid,kind,revision)
+        jid=self.store.add_job(pid,kind,revision,confirm_model_retry_after_prior_call=confirm_model_retry_after_prior_call)
         self.executor.submit(self.run,jid,p,kind)
         return {'job_id':jid}
     def run(self,jid,p,kind):
         # Claim only pending work. A queued executor callback may already be cancelled.
         with self.store.connect() as c:
-            claimed=c.execute("UPDATE jobs SET status='running',message='正在处理',updated_at=? WHERE id=? AND kind=? AND status='queued'",(now(),jid,kind)).rowcount
+            initial_result=json.dumps({'phase':'preflight'},ensure_ascii=False) if kind=='submit' else None
+            claimed=c.execute("UPDATE jobs SET status='running',message='正在处理',result=coalesce(?,result),updated_at=? WHERE id=? AND kind=? AND status='queued'",(initial_result,now(),jid,kind)).rowcount
         if not claimed:return
         try:
             if kind=='image-host':
@@ -221,6 +222,8 @@ class App:
                     raise Problem('店铺内容提交配置已变化，本次未发送',409)
                 client=Noon(); data=payload(current)
                 preflight_attributes(client.attributes(current['category']),data)
+                # Persist the uncertain-write boundary before crossing into the seller upsert.
+                self.store.job_phase(jid,'submit_dispatching','Noon只读预检已通过；提交请求即将发送，若进程中断需先回查平台')
                 try: result=client.submit(data)
                 except Exception:
                     self.store.job_result(jid,'uncertain','提交请求可能已到达 noon。请先按 SKU 在平台核对，禁止直接重发当前版本')
@@ -308,6 +311,10 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def app(self): return self.server.app
     def respond(self,body,status=200,content_type='application/json; charset=utf-8',filename=None):
+        if self.command=='POST' and 200<=status<300:
+            path=urlsplit(self.path).path
+            if path.endswith('/approve') or path=='/api/approval-batch/apply':self.app.automation.wake(approval=True)
+            elif path.startswith(('/api/automation/','/api/models/')):self.app.automation.wake()
         if isinstance(body,(dict,list)): body=json.dumps(body,ensure_ascii=False,allow_nan=False).encode()
         if isinstance(body,str): body=body.encode()
         self.send_response(status)
@@ -662,7 +669,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/platform-batch/cancel':return self.respond(PlatformBatch(self.app,b.get('kind','refresh')).cancel(b.get('request_id')))
             if path.startswith('/api/content-submit-batch/'):
                 action=path.removeprefix('/api/content-submit-batch/')
-                if action not in ('preview','apply','cancel'):raise Problem('操作不存在',404)
+                if action not in ('preview','apply','cancel','reconcile'):raise Problem('操作不存在',404)
                 batch=ContentSubmitBatch(self.app)
                 return self.respond(getattr(batch,action)(b))
             if path in ('/api/platform-batch/preview','/api/platform-batch/apply'):
@@ -749,7 +756,9 @@ class Handler(BaseHTTPRequestHandler):
                     if url and (parsed.scheme!='https' or not parsed.hostname or parsed.username): raise Problem('成图地址须为公开HTTPS链接')
                     target['public_url']=url
                 return self.respond(store.update(pid,{},revision,{'images':images,'images_verified':False}))
-            return self.respond(self.app.queue(pid,action,revision),202)
+            confirm_model_retry=b.get('confirm_model_retry_after_prior_call',False)
+            if type(confirm_model_retry) is not bool:raise Problem('模型重试确认资料无效')
+            return self.respond(self.app.queue(pid,action,revision,confirm_model_retry_after_prior_call=confirm_model_retry),202)
         except Problem as e: self.respond({'error':str(e)},e.status)
         except Exception: self.respond({'error':'本地操作失败，请检查输入后重试；已保存的数据仍然保留'},500)
 
