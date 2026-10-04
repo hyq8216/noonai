@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 22112)
-Total output lines: 511
+Warning: truncated output (original token count: 22372)
+Total output lines: 519
 
 # 云端迁移验证记录
 
@@ -301,13 +301,7 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 ### 2026-10-04 定时备份与定时副本保留
 
 - 实现范围：在备份设置页提供默认关闭的本地定时策略（6/12/24/48/168小时周期，保留1–100份）；配置持久化于本地 recovery/schedule.json。应用服务运行期间由后台线程扫描；应用关闭时不运行，重新启动后若备份已到期则尽快补跑。重新启动检测到上次状态为 running 时标记 interrupted 并尽快重试。页面显示启停、周期、下次/上次执行、最近备份编号状态与错误。
-- 到期后先创建并验证新档案，再仅清理超出策略份数的旧定时档案；手动档案和恢复前回退档案不自动删除。清理前先验证所有候选，任一候选…4112 tokens truncated…页筛选与展开结果核对。最终 `bash scripts/check.sh` 退出0：418项测试通过（57.376秒）；隔离服务重启检查通过；10,000 SKU查询/分页通过（启动就绪913ms、状态资源475ms、商品列表132ms、SKU搜索46ms）；Chromium七个导航面、两个异常报价分类、调度设置、提交回执人工对账和跨批异常CSV下载通过。文档写入后复核 `git diff --check` 通过。
-- 限制：旧回执仅作为历史观察展示，不等于当前店铺状态；没有连接真实卖家账户，不代表库存、价格、前台可见或真实购买能力已验证，`real_noon_verified=false`。真实价格/库存写入仍待经营模式、仓库映射及授权确认。
-
-### 2026-10-04 库存同步候选预览安全回归
-
-- 覆盖缺口：FBPI库存候选预览已有实现，但过去全量测试没有直接调用 `StockPlan.preview`，浏览器主流程也没有打开库存页核对数字。
-- 新增 `workbench/tests/test_stock_plan.py` 三项专项：合成 LOCAL 商品从本地仓实物20件开始，预占3件和尚未占用订单4件分别扣除，buffer=2 后未封顶上限为11，单SKU cap=8 后建议量为8；供应商可供900件、采购待收50件和调拨在途5件均不计入。另验证本地NGS商品被排除、缺仓库码/平台身份时保留blocked、数量/编码参数拒绝非法值，并核对预览前后库存流水、采购/调拨/订单单据数量及商品修订号没有变化。
+- 到期后先创建并验证新档案，再仅清理超出策略份数的旧定时档案；手动档案和恢复前回退档案不自动删除。清理前先验证所有候选，任一候选…4372 tokens truncated…仓实物20件开始，预占3件和尚未占用订单4件分别扣除，buffer=2 后未封顶上限为11，单SKU cap=8 后建议量为8；供应商可供900件、采购待收50件和调拨在途5件均不计入。另验证本地NGS商品被排除、缺仓库码/平台身份时保留blocked、数量/编码参数拒绝非法值，并核对预览前后库存流水、采购/调拨/订单单据数量及商品修订号没有变化。
 - Chromium smoke 在10,000件合成目录打开库存页，提交本地仓、buffer=2、cap=8，核对显示实物20、订单需求3、缓冲2、候选8以及“供应商可供20（未计入）”。最终 `bash scripts/check.sh` 退出0：421项测试通过（60.540秒）；隔离服务启动/调度/写入保护/导入去重/持久化重启通过；10,000 SKU路径通过（启动就绪939ms、状态资源693ms、商品列表148ms、精确SKU搜索35ms、50件分页）；Chromium八个导航面、库存候选预览、零价格/过期报价检查、调度配置、提交对账与跨批异常CSV下载通过。文档写入后 `git diff --check` 通过。
 - 限制：本地FBPI候选计算不是Noon库存同步，不会发送平台；Seller Lab 仓库编码、经营模式、账号权限与平台读回未验证。候选量不代表实际可售、订单或利润；`real_noon_verified=false`。
 
@@ -443,4 +437,12 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 根因：CI browser job用系统 Python 并设 `NOON_PYTHON=python`，但扩展后的 `scripts/browser/smoke.cjs` 10处夹具/回读仍直接执行 `.venv/bin/python`；browser job没有创建 `.venv`。故spawnSync返回 `status=null`，失败发生在 smoke 第30行，不是业务 HTTP、Chromium 或 Linux 字体问题。
 - 修复：统一定义 `pythonExe = process.env.NOON_PYTHON || <repo>/.venv/bin/python`，服务启动与所有10处夹具、SQLite回读都使用同一解释器选择器。
 - 复验：`node --check scripts/browser/smoke.cjs` 通过；用指向本机依赖环境的临时 Python 命令别名设置 `NOON_PYTHON`，完整真实 Chromium smoke 通过（18个分组入口、390px布局、铺货/库存/报价/调度、图片导入、提交对账和货源候选池）；随后 `bash scripts/check.sh` 退出0：443 tests in 47.932s，隔离服务与 Chromium 全部通过。10,000件目录快照0.633秒、跨桶边界回读0.431毫秒、商品列表85毫秒、精确SKU搜索11毫秒；这些为Mac单次合成数据读数。
-- 当前门槛：后端已有 Ubuntu 真实绿证；解释器修复尚未进入 GitHub CI 的已完成运行，须等待下一轮 Ubuntu browser job 重跑通过后，才能把本次快照标为 Linux backend+browser 全通过。真实 Noon 账号、Mac安装包仍未在此轮验证。
+- 当时门槛：后端已有 Ubuntu 真实绿证；解释器修复还需等待下一轮 CI 实际运行。其最终回读见下一节。
+
+### 2026-10-04 当前平台变更完整 Ubuntu CI 验收
+
+- 修复后的提交 `d0c9a8c645eef1b8fcced613ed6bf12033bb30ea` 对应 GitHub Actions run `37200574297`，GitHub workflow conclusion 为 `success`。
+- Ubuntu backend：**443 tests in 69.817s，OK**；隔离启动、调度器、写入保护、导入去重、持久化和重启检查通过。
+- Ubuntu browser：真实 Chromium smoke 通过桌面与390px手机布局的全部18个分组导航，无横向溢出；铺货只读预检/无模型调用、库存预览、零售价/过期报价提醒、调度设置、原图选择/匹配/权利记录/导入隔离、人工提交对账、异常CSV及货源候选池预览/登记/导出全部通过。
+- 这是当前443测试源码在 Ubuntu 24.04 / Python 3.12.14 / Node 22.23.3 上的实际通过记录。后续文档更新会触发新的 CI；此处证据只对应提交 `d0c9a8c`。本地 `bash scripts/check.sh` 同样通过443项测试、服务重启和 Chromium smoke；`git diff --check` 通过。
+- 边界：这证明软件回归和浏览器流程，不证明真实 Noon 店铺写入、Offer有效可售/订单/利润或 macOS当前源码安装包；`real_noon_verified=false`。
