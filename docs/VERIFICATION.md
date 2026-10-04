@@ -498,4 +498,6 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 故障注入复现：模拟Noon提交超时（可能已发送），再让第一次本地`job_result(..., 'uncertain')`写入短暂失败。旧异常处理会将任务标成`failed`，且`Store.add_job`允许为同商品/版本创建第二个提交任务；单次复现记录为`status=failed`、`second_job_created=true`。这是可造成重复卖家写入的真实软件缺陷，尽管网络客户端未被重试。
 - 修复：新增`Store.fail_job_safely`，在一个SQLite写事务中读取job持久阶段并决定失败状态。提交仍在`preflight`时可标记`failed`并安全重排；状态已越过预检边界时只能标`uncertain`并提示先按SKU回查；若任务已被其他路径恢复或改写，则不覆盖。若本地数据库仍不能记录异常状态，原`running`行保留，下一次独占启动将其恢复成`interrupted`，继续阻止重发。
 - 新增`test_transient_uncertain_receipt_write_failure_keeps_submit_blocked`，验证超时后首次不确定回执持久化失败会安全落为`uncertain`，并断言相同商品版本不能创建第二提交任务。与限流前置只读预检及重启恢复定向回归共3项通过。
-- 完整`bash scripts/check.sh`第二轮退出0：853项业务测试、21项桌面测试、隔离服务启动/恢复检查及全量本机Chromium浏览器流程通过，包含MV3扩展安装/执行、uncertain Noon提交人工对账和付费模型重试二次确认。首轮全量检查在扩展下载回执完成状态后偶发读不到`filename`而中止；隔离复跑及第二轮全量均通过，列为待留意的浏览器测试时序波动。`git diff --check`通过。对应Ubuntu CI尚待运行；没有真实Noon凭证/账号或外部写入。
+- 完整`bash scripts/check.sh`两轮均退出0：每轮853项业务测试、21项桌面测试、隔离服务启动/恢复检查及全量本机Chromium浏览器流程通过，包含MV3扩展安装/执行、uncertain Noon提交人工对账和付费模型重试二次确认。Ubuntu首次运行的browser job在扩展下载回执处稳定复现时序：`downloads.search()`观察到`state=complete`时`filename`仍未就绪，随后读取为空。测试现在等`complete`且本地路径非空，再核验路径和文件；改动后连续5次本机MV3流程通过，修复版远端CI待运行。该修复仅收紧测试等待条件，不改变扩展或产品行为。
+- 远端修复前验证：Ubuntu backend run `37240974879`通过；browser job同run因上述测试回执时序失败；macOS DMG run `37240974867`成功（构建、挂载检查与打包回归通过）。以这些结果不推断浏览器工作流已通过，也不推断本机已安装该DMG。
+- `git diff --check`通过；没有真实Noon凭证/账号或外部写入。
