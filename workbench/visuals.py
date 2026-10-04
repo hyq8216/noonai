@@ -462,7 +462,11 @@ class Visuals:
                 else:
                     if matched:quality_error='生成输出与参考原图画面几乎相同，可能只是重编码或缩放；输出已保留，不能作为新制作图'
             diagnostics.update(output_width=info['width'],output_height=info['height'],output_check='rejected' if quality_error else 'passed')
-            self.current(r)
+            try:self.current(r)
+            except Problem:
+                stale_note='生成期间商品规格或参考原图发生变化；本次已收到的旧版本图片已保留，但不可验收或加入商品'
+                quality_error=(quality_error+'；'+stale_note) if quality_error else stale_note
+                diagnostics.update(output_check='rejected',output_check_reason='生成期间商品规格或参考原图发生变化')
             aid=ident();ext={'PNG':'png','JPEG':'jpg','WEBP':'webp'}[info['format']]
             dest=self.media.root/(aid+'.'+ext);preview=self.media.root/(aid+'-preview.jpg');shutil.copyfile(out,dest)
             try:

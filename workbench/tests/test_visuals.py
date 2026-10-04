@@ -158,6 +158,21 @@ class VisualTests(unittest.TestCase):
   with self.assertRaises(Problem):self.attach(self.v.get(jid)['asset_id'])
   with self.assertRaises(Problem):self.review(jid)
   self.review(jid,decision='rejected',note='源商品已变更')
+ def test_product_edit_during_successful_generation_preserves_stale_output_held(self):
+  jid=self.job()
+  def generated(rpc,cwd,model,prompt,paths,dispatched,**kwargs):
+   dispatched('qa-thread')
+   p=self.store.get(self.pid);self.store.update(self.pid,{'facts':'6件红色'},p['revision'])
+   return self.output.read_bytes(),{'thread_id':'qa-thread','turn_id':'qa-turn','image_item_id':'qa-image'}
+  with patch('visuals.generate_image',side_effect=generated):self.v.drain()
+  job=self.v.get(jid);self.assertEqual(job['status'],'output_rejected');self.assertIsNotNone(job['asset_id'])
+  asset=self.media.get(job['asset_id']);self.assertEqual((self.media.root/asset['file']).read_bytes(),self.output.read_bytes())
+  self.assertIn('旧版本图片已保留',job['message']);self.assertIn('不可验收或加入商品',job['message'])
+  self.assertEqual(job['trace']['diagnostics']['output_check'],'rejected')
+  self.assertIn('商品规格',job['trace']['diagnostics']['output_check_reason'])
+  with self.assertRaises(Problem):self.review(jid)
+  with self.assertRaises(Problem):self.attach(asset['id'])
+  self.v.control({'action':'discard-output','id':jid});self.assertEqual(self.v.get(jid)['status'],'cancelled')
  def test_reference_copy_is_hash_checked_before_model_dispatch(self):
   jid=self.job();original=__import__('shutil').copyfile
   def corrupt_copy(source,destination):
