@@ -562,6 +562,13 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 打包前端读回：用配套 Chromium 打开该包启动的临时本机服务，导航至“连接设置”，实测出现两条2026年官方公告核对说明、两个1688官方链接及“待官方授权”状态；截图 `/tmp/noon-native-respin-settings.png`。商品/资料均为空白隔离测试库。
 - 边界：这验证本地Apple Silicon开发包的启动、打包后端和前端静态资源，不是可交付安装器；没有生成DMG、Developer ID签名、公证或真实店铺操作。截图与包留在 `/tmp` 临时验证目录，未覆盖 `desktop/dist`，`real_noon_verified=false`。
 
+### 2026-10-05 PR #2 设置提示变更本机隔离树与 Ubuntu CI
+
+- 隔离树：以 PR 更新前 head `dcf5610610995f621a69dfc508028565215cdbbd` 创建临时 worktree，只带入 `desktop/README.md`、两份验证/路线图文档、`scripts/browser/smoke.cjs` 和 `workbench/static/app.js` 五个预期文件。上传 GitHub 前逐个核对 blob SHA 与本地提交一致，提交 `34e18df819278f40a2f72f8332ec58b7619723a6` 的父节点为原 PR head；未包含工作区其他未提交文件或本地业务数据。
+- 本机回归：隔离树运行后端全量测试 **447 tests in 48.712s，OK**，隔离启动/调度/写保护/导入去重/持久化/重启通过。首次整段 `scripts/check.sh` 在浏览器阶段因临时 worktree 未安装 Playwright 而退出1（`Cannot find module 'playwright'`），并非测试断言失败；将 `NODE_PATH` 和浏览器缓存指向主工作区已有依赖后，单独执行同一 `scripts/browser/smoke.cjs` 退出0，真实 Chromium 桌面及390px布局、18个导航入口、铺货正向流程停在人审、图片权利、提交核对和候选池流程通过。10,000件合成目录：启动就绪530ms、初始状态5ms/9,167字节、列表81ms、精确SKU查询12ms、50件分页通过；单次本机指标非生产SLA。
+- 远端验收：PR #2 head `34e18df819278f40a2f72f8332ec58b7619723a6` 对应 GitHub Actions run `37228710591`，workflow conclusion=`success`；Ubuntu `backend` 与 `browser` jobs 均成功。当前 PR head 已包含这次 1688 公告文案、浏览器断言及文档记录。
+- 边界：Ubuntu和本机均为合成数据/协议夹具；没有1688应用权限、真实货源数据、卖家账号或Noon刊登/Offer回读。官方采集适配器仍为 HOLD，`real_noon_verified=false`。
+
 
 ### 2026-10-04 完整回归复跑
 
