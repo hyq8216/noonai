@@ -408,15 +408,21 @@ box.process_large_catalog('browser-bulk.csv',digest,'.csv',content,{'translate':
 ` , root, data], {encoding:'utf8'});
     assert.equal(catalog.status, 0, catalog.stderr);
     await navigateTo('import');
-    const inboxListingResponse = page.waitForResponse(response =>
-      response.url().includes('/api/state?') && response.url().includes('surface=import'), {timeout:15000});
+    const inboxListingResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/source-inbox/list' && url.searchParams.get('query') === 'browser-bulk.csv';
+    }, {timeout:20000});
     await page.locator('#source-inbox-group').selectOption('all');
     await page.locator('#source-inbox-query').fill('browser-bulk.csv');
     await page.locator('#source-inbox-history button').click();
-    assert.equal((await inboxListingResponse).status(),200);
+    const inboxListingHttp = await inboxListingResponse;
+    assert.equal(inboxListingHttp.status(),200,await inboxListingHttp.text());
+    const filteredInbox = await inboxListingHttp.json();
+    assert.equal(filteredInbox.files.length,1,JSON.stringify(filteredInbox));
+    assert.equal(filteredInbox.files[0].name,'browser-bulk.csv');
     const inboxReadback = await page.evaluate(async () => (await (await fetch('/api/source-inbox/list?page=0&group=all&kind=all&query=browser-bulk.csv')).json()).files);
     assert.equal(inboxReadback.length, 1, JSON.stringify(inboxReadback));
-    await page.locator('[data-source-inbox-detail="browser-bulk.csv"]').waitFor();
+    await page.locator('[data-source-inbox-detail="browser-bulk.csv"]').waitFor({timeout:20000});
     await page.locator('[data-source-inbox-detail="browser-bulk.csv"]').click();
     const issueExport = page.locator('#source-inbox-issues-export');
     await issueExport.waitFor();
@@ -483,7 +489,7 @@ print('fixture-profile-ready')
     await campaignPage.locator('#campaign-apply').click();
     await campaignPage.locator('[data-nav="automation"][aria-current="page"]').waitFor();
     await campaignPage.waitForFunction(() => [...document.querySelectorAll('.auto-item')].some(item =>
-      item.innerText.includes('待人工审核') && item.innerText.includes('请打开商品')),{timeout:30000});
+      item.innerText.includes('待人工审核') && item.innerText.includes('请打开商品')),null,{timeout:30000});
     const workflowReadback = spawnSync(pythonExe, ['-c', `
 import json,sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3');db.row_factory=sqlite3.Row
