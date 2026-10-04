@@ -1,10 +1,10 @@
 import copy,json,unittest
 from io import BytesIO
 from unittest.mock import patch,Mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import test_video_batch as fixtures
 from core import Problem
-from connectors import Noon,request_json,RateLimited
+from connectors import Noon,request_json,RateLimited,UncertainExternalCall
 from offer_status import validate,summarize
 from platform_batch import PlatformBatch
 
@@ -51,6 +51,13 @@ class OfferTests(unittest.TestCase):
   opener.open.side_effect=HTTPError('https://example.test',429,'Too Many Requests',{'X-Ratelimit-Retry-After':'9999999','X-Request-Id':'secret token'},BytesIO(b''))
   with self.assertRaises(RateLimited) as invalid:request_json('https://example.test',{},opener=opener)
   self.assertIsNone(invalid.exception.retry_after_seconds);self.assertIsNone(invalid.exception.request_id);self.assertEqual(opener.open.call_count,2)
+ def test_transport_failure_and_server_error_are_uncertain(self):
+  opener=Mock();opener.open.side_effect=URLError('connection timed out')
+  with self.assertRaises(UncertainExternalCall):request_json('https://example.test',{},opener=opener)
+  self.assertEqual(opener.open.call_count,1)
+  opener=Mock();opener.open.side_effect=HTTPError('https://example.test',503,'Unavailable',{},BytesIO(b'secret'))
+  with self.assertRaises(UncertainExternalCall) as caught:request_json('https://example.test',{},opener=opener)
+  self.assertIn('HTTP 503',str(caught.exception));self.assertNotIn('secret',str(caught.exception));self.assertEqual(opener.open.call_count,1)
  def test_noon_client_notifies_owner_on_429(self):
   n=Noon.__new__(Noon);n.creds={'project_code':'qa'};n.opener=Mock();n.on_rate_limited=Mock();limited=RateLimited(12,'req-qa')
   with patch('connectors.request_json',side_effect=limited) as req:

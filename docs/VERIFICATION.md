@@ -446,3 +446,10 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - Ubuntu browser：真实 Chromium smoke 通过桌面与390px手机布局的全部18个分组导航，无横向溢出；铺货只读预检/无模型调用、库存预览、零售价/过期报价提醒、调度设置、原图选择/匹配/权利记录/导入隔离、人工提交对账、异常CSV及货源候选池预览/登记/导出全部通过。
 - 这是当前443测试源码在 Ubuntu 24.04 / Python 3.12.14 / Node 22.23.3 上的实际通过记录。后续文档更新会触发新的 CI；此处证据只对应提交 `d0c9a8c`。本地 `bash scripts/check.sh` 同样通过443项测试、服务重启和 Chromium smoke；`git diff --check` 通过。
 - 边界：这证明软件回归和浏览器流程，不证明真实 Noon 店铺写入、Offer有效可售/订单/利润或 macOS当前源码安装包；`real_noon_verified=false`。
+
+### 2026-10-04 模型 API 丢失回执保护
+
+- 根因：API 模型请求的传输超时由连接器包装成普通 `Problem`，调用账本因此记为 `failed`。虽然相同 request key 会被阻止重放，但失败状态没有告诉操作员“请求可能已送达”，容易诱发换新 request key 后盲目再次付费。
+- 修复：新增 `UncertainExternalCall` 明确标记可能送达但无可靠回执的传输错误；连接超时/网络错误及 HTTP 5xx 将模型调用记为 `uncertain`，保留费用预留并提示先核对服务记录。显式 HTTP 429 仍是已知限流；已收到但模型内容格式错误的情况仍记为已知失败并保留用量。所有状态都禁止相同 request key 自动重发。
+- 回归：模型专项覆盖“超时后 uncertain、同 key 重试不产生第二次请求”和“显式429 failed、同 key 重试不产生第二次请求”；连接器覆盖 URLError 及 HTTP 503 分类、错误正文不泄露及每种情况只请求一次。`test_automation*.py` 37项、`test_offer_status.py` 12项通过。完整 `bash scripts/check.sh` 退出0：**446项业务测试，48.883秒**；隔离服务启动与重启通过；真实 Chromium 桌面及390px窄屏18个导航入口与铺货、原图导入、提交回执和其它浏览器关键路径通过。10,000 SKU 精确搜索11ms、50项分页通过；这些是本机临时合成数据单次测量。
+- 边界：自动识别只覆盖传输错误和 HTTP 5xx；不同服务商对 5xx 是否已计费/接受任务的语义不一，软件因此保守地标为不确定，仍需人工核对。不得因 `failed`/`uncertain` 状态将新 request key 自动派发；订阅模型同样保持既有的不自动重发与额度对账规则。没有真实服务账单、Noon 店铺提交或Offer回读，`real_noon_verified=false`。

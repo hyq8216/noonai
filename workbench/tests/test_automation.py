@@ -17,6 +17,7 @@ from PIL import Image
 from core import Store,Problem,now,normalize_image
 from server import App,Handler
 from models import Models
+from connectors import UncertainExternalCall, RateLimited
 
 CONTENT={'title_en':'Black Clips, 5 Pieces','description_en':'Five black clips.','title_ar':'مشابك سوداء','description_ar':'خمسة مشابك سوداء','warnings':[]}
 def response(data=CONTENT,usage=True):
@@ -70,6 +71,20 @@ class ModelsTests(unittest.TestCase):
             with self.assertRaises(Problem) as e:self.models.call(pid,{},'fail')
         self.assertNotIn('test-secret-only',str(e.exception));c=self.models.state()['calls'][0]
         self.assertEqual(c['charged_micro'],c['reserved_micro']);self.assertGreater(c['charged_micro'],0)
+    def test_api_transport_timeout_is_uncertain_and_cannot_replay_same_key(self):
+        pid=self.profile()
+        with patch('models.request_json',side_effect=UncertainExternalCall()) as req:
+            with self.assertRaises(Problem):self.models.call(pid,{},'timeout-after-send')
+            self.assertEqual(self.models.state()['calls'][0]['status'],'uncertain')
+            with self.assertRaises(Problem):self.models.call(pid,{},'timeout-after-send')
+            self.assertEqual(req.call_count,1)
+    def test_explicit_model_429_is_known_failure_and_never_auto_retries(self):
+        pid=self.profile()
+        with patch('models.request_json',side_effect=RateLimited(30,'req-123')) as req:
+            with self.assertRaises(Problem):self.models.call(pid,{},'explicit-429')
+            self.assertEqual(self.models.state()['calls'][0]['status'],'failed')
+            with self.assertRaises(Problem):self.models.call(pid,{},'explicit-429')
+            self.assertEqual(req.call_count,1)
     def test_budget_and_rate_reject_before_network(self):
         pid=self.profile(daily_usd='.000001')
         with patch('models.request_json') as req:

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from urllib.parse import urlsplit
 from core import Problem, ident, now
-from connectors import request_json
+from connectors import request_json, UncertainExternalCall
 from codex_subscription import CodexSubscription, SubscriptionWait, MODELS
 
 BASES={'openai':'https://api.openai.com/v1','minimax':'https://api.minimax.io/v1','minimax-cn':'https://api.minimax.cn/v1'}
@@ -334,7 +334,8 @@ class Models:
             message=str(e) if isinstance(e,Problem) else '模型响应无法处理，未修改商品'
             # Defensive redaction even if a future adapter embeds its key in an exception.
             message=message.replace(secret,'[密钥已隐藏]') if secret else message
-            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if subscription else 'failed',json.dumps(usage),charged,message,now(),cid))
+            uncertain=subscription or isinstance(e,UncertainExternalCall)
+            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if uncertain else 'failed',json.dumps(usage),charged,message,now(),cid))
             raise Problem(message, e.status if isinstance(e,Problem) else 502)
     def translate(self,p,request_key,role='primary'):
         if not p.get('facts'):raise Problem('先填写规格事实，避免无依据生成',409)

@@ -22,6 +22,11 @@ class RateLimited(Problem):
         trace=f' 请求编号：{request_id}。' if request_id else ''
         super().__init__(f'外部服务明确返回 HTTP 429 限流；本次不会自动重发。{wait}{trace}',429)
 
+class UncertainExternalCall(Problem):
+    """The request may have reached the service, but no reliable receipt arrived."""
+    def __init__(self,message='外部服务连接失败或超时。请求可能已送达；请先核对服务记录再重试。'):
+        super().__init__(message,502)
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise Problem('服务地址发生跳转，请核对配置；未向新地址转发凭证',502)
@@ -65,9 +70,11 @@ def request_json(url, body, headers=None, opener=None, method='POST'):
             e.close()
             raise RateLimited(retry_after,request_id)
         e.close()
+        if e.code>=500:
+            raise UncertainExternalCall(f'外部服务返回 HTTP {e.code}，处理结果可能不确定；请先核对服务记录再重试。')
         raise Problem(f'外部服务返回 HTTP {e.code}。请检查权限、额度和服务配置。',502)
     except (URLError,TimeoutError,OSError):
-        raise Problem('连接外部服务失败或超时。提交任务请先核对平台结果再重试。',502)
+        raise UncertainExternalCall()
     except (ValueError,KeyError):
         raise Problem('外部服务返回格式不符合约定',502)
 
