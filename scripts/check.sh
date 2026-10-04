@@ -12,6 +12,7 @@ node scripts/browser/navigation.cjs
 node scripts/browser/minimax_subscription.cjs
 node scripts/browser/scheduler.cjs
 node scripts/browser/collection.cjs
+node scripts/browser/catalog_campaign.cjs
 node scripts/browser/erp.cjs
 node scripts/browser/bank.cjs
 node scripts/browser/fulfillment.cjs

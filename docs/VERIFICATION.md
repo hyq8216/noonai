@@ -501,3 +501,10 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 完整`bash scripts/check.sh`两轮均退出0：每轮853项业务测试、21项桌面测试、隔离服务启动/恢复检查及全量本机Chromium浏览器流程通过，包含MV3扩展安装/执行、uncertain Noon提交人工对账和付费模型重试二次确认。Ubuntu首次运行的browser job在扩展下载回执处稳定复现时序：`downloads.search()`观察到`state=complete`时`filename`仍未就绪，随后读取为空。测试现在等`complete`且本地路径非空，再核验路径和文件；改动后连续5次本机MV3流程通过，Ubuntu修复版push与PR CI均通过（详见下一条）。该修复仅收紧测试等待条件，不改变扩展或产品行为。
 - 远端最终验证：精确SHA `e0387eef0638a0018276570a9abf917259f65ff6`的Ubuntu push run `37241333575`和PR run `37241335645`均成功，两个run各自的backend/browser jobs全部通过；浏览器job实际执行了MV3扩展下载检查。修复前SHA `a25da674342dfab287d5eff3003c38f1ad085014`的Ubuntu backend run `37240974879`通过，browser仅因该已修复的测试时序问题失败。macOS DMG run `37240974867`在修复前提交上成功完成打包回归、构建和挂载检查；最新提交只调整浏览器测试等待条件与文档，不改应用构建内容。成功记录：[Ubuntu push](https://github.com/hyq8216/noonai/actions/runs/37241333575)、[Ubuntu PR](https://github.com/hyq8216/noonai/actions/runs/37241335645)、[macOS DMG](https://github.com/hyq8216/noonai/actions/runs/37240974867)。本机没有安装/运行CI导出的DMG。
 - `git diff --check`通过；没有真实Noon凭证/账号或外部写入。
+
+### 5000件目录铺货预览与分批安排（2026-10-05）
+
+- 发现：`CatalogCampaign`最多允许5000件并按500件分段预检/建流程，但原回归没有对应测试文件，CI也没有浏览器操作脚本覆盖“目录分批安排筛选结果”；工作区README将该功能标为未测试。
+- 新增3项后端回归：5000件预览生成10个500件chunk且只读、不建流程；1001件应用跨500边界，逐件隔离已有活动任务和缺货源事实行，只为999件新建流程，最多每流程500项；请求重放不重复建流程，完整异常快照保留；资料版本变更后旧token被拒，request id冲突也不能改写既有流程。特设最后一块只有异常行仍跳过建空流程。
+- 新增真实本地HTTP/Chromium工作流：载入合成可安排、缺规格事实、已有活动任务三件商品，关闭翻译调用后经界面预览并人工确认；核对历史和两条异常快照，随后改动商品事实验证旧预检失效。无模型或卖家请求。
+- 定向`.venv/bin/python -m unittest discover -s workbench/tests -p 'test_catalog_campaign.py' -v`：3项通过；`node scripts/browser/catalog_campaign.cjs`通过。全量`bash scripts/check.sh`退出0：856项业务测试、21项桌面测试、隔离启动/恢复 smoke与全部浏览器流程通过；40页导航、MV3、Noon人工对账等流程以及新增铺货流程均通过。`git diff --check`通过。该批结果使用临时合成工作区，不能证明真实目录的长期性能或真实noon可售。
