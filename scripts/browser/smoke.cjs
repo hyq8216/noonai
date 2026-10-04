@@ -489,8 +489,22 @@ print('fixture-profile-ready')
     assert.equal(await campaignPage.locator('#campaign-apply').isEnabled(),true);
     await campaignPage.locator('#campaign-apply').click();
     await campaignPage.locator('[data-nav="automation"][aria-current="page"]').waitFor();
-    await campaignPage.waitForFunction(() => [...document.querySelectorAll('.auto-item')].some(item =>
-      item.innerText.includes('待人工审核') && item.innerText.includes('请打开商品')),null,{timeout:30000});
+    try {
+      await campaignPage.waitForFunction(() => [...document.querySelectorAll('.auto-item')].some(item =>
+        item.innerText.includes('待人工审核') && item.innerText.includes('请打开商品')),null,{timeout:30000});
+    } catch (error) {
+      const automationUi = await campaignPage.locator('.auto-item').allInnerTexts();
+      const automationDb = spawnSync(pythonExe, ['-c', `
+import json,sqlite3,sys
+db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3');db.row_factory=sqlite3.Row
+product=db.execute("SELECT id FROM products WHERE json_extract(data,'$.source_sku')='PERF-09999'").fetchone()
+result={'runs':[dict(r) for r in db.execute("SELECT name,status,plan FROM automation_runs ORDER BY rowid DESC LIMIT 3")],
+ 'items':[dict(r) for r in db.execute("SELECT status,step,message,data FROM automation_items WHERE product_id=? ORDER BY updated_at DESC LIMIT 3",(product['id'],))] if product else [],
+ 'calls':[dict(r) for r in db.execute("SELECT status,message,profile FROM model_calls WHERE product_id=? ORDER BY created_at DESC LIMIT 4",(product['id'],))] if product else []}
+print(json.dumps(result,ensure_ascii=False))
+`, data], {encoding:'utf8'});
+      throw new Error(`${error.message}; automation UI=${JSON.stringify(automationUi)}; automation DB=${automationDb.stdout.trim()}; DB stderr=${automationDb.stderr}`);
+    }
     const workflowReadback = spawnSync(pythonExe, ['-c', `
 import json,sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3');db.row_factory=sqlite3.Row
