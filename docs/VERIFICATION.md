@@ -197,8 +197,7 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 
 ### 2026-10-04 不确定 Noon 提交跨版本重发拦截
 
-- 复现到一条安全缺口：之前 `uncertain` / `interrupted` 提交只锁定产生该回执的修订号，编辑商品形成新修订后，单件任务与批量预检都可能放行。由于原请求仍可能已到达 Noon，这不能视为安全重试。
-- 现在提交保护按商品身份检查所有修订：同 SKU 任一 `uncertain`、`needs_attention` 或 `interrupted` 提交任务未处理前，单件 `add_job` 和批量预检均阻止再次排队。错误信息明确说明仅编辑商品不能解除拦截。
+- 复现到一条安全缺口：之前 `uncertain` / `interrupted` 提交只锁定产生该回执的修订号，编辑商品形成新修订后，单件任务与批量预检都可能放行。由于原请求仍可能已到达 Noon，这不能视为安全重试。- 现在提交保护按商品身份检查所有修订：同 SKU 任一 `uncertain`、`needs_attention` 或 `interrupted` 提交任务未处理前，单件 `add_job` 和批量预检均阻止再次排队。错误信息明确说明仅编辑商品不能解除拦截。
 - 新增隔离数据库测试，模拟 Noon 请求已发送但客户端超时、服务重启时任务处于 running、改版后再尝试单件与批量提交。专项 2 项通过。
 - 随后补上人工核对接口与任务页流程：必须确认已登录 Seller Lab、核对完全匹配的 SKU、填写至少8字依据；“已找到”还需记录 Noon 商品编号；“未找到”不能用于已有商品编号或平台已明确返回需处理的任务。结论及依据写入独立审计表和商品操作记录。已找到会登记平台编号和原提交版本但保持 `live_verified=false`；确认未找到只解除该项回执阻断，商品仍需人工重新排队。
 - 页面读回保留原任务的 `uncertain` / `interrupted` 状态，在同一历史行显示人工核对结论、依据和时间，并隐藏重复核对表单。发现并修复侧栏进入“任务与记录”未刷新任务明细的问题。
@@ -397,7 +396,6 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 检查边界：浏览器运行使用隔离临时数据库与合成商品；没有验证真实 noon 账号、真实刊登或店铺运营结果，`real_noon_verified=false`。Impeccable机械检查完成，输出的是项目既有字号/颜色与设计文档的 advisory。
 
 ### 2026-10-04 批量刊登混合回执隔离与重放保护
-
 - 覆盖缺口：单 SKU 的超时、重启与回执对账已有专项，但批量内容提交在一批多件商品分别返回成功、超时不确定、有效但需人工处理的 Noon 回执时，缺少批次级状态隔离和同请求重放回归。
 - 新增 `UncertainSubmitTests.test_content_submit_batch_isolates_mixed_results_and_replay_never_resends`。使用临时 SQLite 数据和 mock Noon，对三件已审核合成商品逐项注入：有效 `status_id: 0` 回执、请求超时、有效 `status_id: 17` 回执。批次分别保留 `done`、`uncertain`、`needs_attention`；再次提交相同 request key 返回原任务并标记 replay，不再派发执行器，也没有增加 Noon 请求数。完成后重新预览三件商品均被回执保护拦截，并呈现对应处理原因。
 - `workbench.tests.test_submit_uncertain` 专项13项通过；`bash scripts/check.sh` 退出0：425项测试通过（57.005秒）。隔离服务启动、调度、写入保护、导入去重、持久化和重启验证通过；10,000 SKU合成目录检查通过（启动就绪1108ms、全量快照0.647秒/约21.0MiB、峰值 Python 分配165.7MB、精确 SKU 搜索18ms、50件分页通过）；真实 Chromium 桌面与390px窄屏遍历18个导航入口，库存预览、零价格/过期报价提醒、调度设置、提交回执对账和跨批问题CSV下载均通过。`git diff --check` 在文档更新后复核。
@@ -567,3 +565,11 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 包内后端：`NOON_VERIFY_APP='/tmp/noon-desktop-package-check/Noon Studio.app' desktop/.venv/bin/python desktop/verify_bundle.py` 退出0。隔离合成流程覆盖采购/收货、订单占用/发货、分次收款、调拨/补货、视觉队列幂等、FFmpeg图组视频、媒体范围读取、重启持久化、备份恢复及回退包下载；没有调用视觉订阅。
 - 原生UI：实际启动该 `.app`，隔离资料目录加载成功；标题正确、默认页面为“批量铺货”、页面取得有效后端状态且无横向溢出。正常退出记录 `dirty=Optional(0); error=nil`。首轮临时检查断言期待旧首页“运营总览”而未通过；按当前默认铺货入口约定修正断言，重跑通过。
 - 边界：这验证本机当前 PR 对应源码、合成数据和开发包；不代表正式DMG、公证发布、1688授权调用、真实Noon刊登或Offer回读，`real_noon_verified=false`。
+
+### 2026-10-04 目录批次正向浏览器闭环与全量复归
+
+- 缺口：原 Chromium 用例只验证未配置模型时目录批次预览为只读，尚未验证确认安排后模型内容、复核和人工审核门槛之间的完整正向交接。
+- 改动：浏览器 smoke 启动仅用于测试的假 `codex app-server` 子进程与一次性数据库。先保持模型路由未设置，证明预览不建流程且不调用模型；随后启用本地订阅协议夹具，在真实 Chromium 页面筛选一件合成 SKU、开启复核、预览并确认目录批次。
+- 结果：预计文字调用2次；假模型生成英文与阿拉伯文内容，复核成功；持久化读回应有1个商品流程停在 `approval` 步骤，2条模型调用均 `done`。本地批准版本仍为空，`jobs` 表无该 SKU 记录，证明未自动批准或发起 Noon 写入。假进程、商品、数据库和媒体均使用临时目录，测试不连接真实 Codex 账号、不产生套餐消耗。
+- 验收：`node --check scripts/browser/smoke.cjs`通过；真实 Chromium 桌面及390px窄屏18个入口均通过、无横向溢出；10,000 SKU本机合成单次基准为服务启动就绪521ms、商品列表57ms、精确SKU搜索12ms、每页50项。最终 `bash scripts/check.sh` 退出0：**447项业务测试，49.550秒**；隔离服务启动、调度、写入保护、导入去重、持久化和重启通过；完整 Chromium smoke通过。读数是本机单次合成测试，不是生产容量承诺。
+- 边界：这证明应用中已编码的订阅协议、目录安排、英阿字段写回、模型复核与人工审核暂停行为；假模型输出不证明真实翻译质量或 Codex 订阅实际可用。没有商品图片/权利材料、真实供应商采集、1688授权、Noon店铺写入、Offer回读或可售验证，`real_noon_verified=false`。
