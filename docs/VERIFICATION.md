@@ -477,8 +477,9 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 新发现的独立功能缺口：本机诊断仍报`arabic_layout=false`；对`draw_text(..., 'منتج عالي الجودة', ...)`的隔离调用稳定抛出“当前图片引擎不支持阿文排版”。当前requirements没有`arabic-reshaper`/`python-bidi`，功能仅以错误门禁拒绝，不能生成阿文卖点模板。此项未在本轮改动，列为下一次图片文字排版优先修复；在修复和视觉像素核验前，不声称Mac本地阿文模板可用。
 - 此worktree的852项结果覆盖其本机未提交代码；前次Ubuntu成功run `37128043274`覆盖的仍是PR #5旧head `f2ac7ba`，没有Linux运行证据证明当前`c66a799`及未提交增量。
 
-### Linux CI 覆盖增补（2026-10-05）
+### Linux CI 覆盖增补与复核（2026-10-05）
 
 - 复核PR #5延续工作树对应的`.github/workflows/verify.yml`时发现，本地`bash scripts/check.sh`已运行、但Ubuntu CI浏览器作业遗漏三个新增流程：大批货源错误行CSV下载、noon不确定提交的人工核对表单、可能重复计费的模型重试确认。
 - 将`source_inbox_errors`、`submit_reconciliation`和`uncertain_model_retry`加入Ubuntu浏览器作业。它们使用真实本地HTTP/Chromium和临时合成数据，不触碰真实店铺、模型、供应商或银行。
-- 当前本地工作树在补充前通过852项业务测试、21项桌面编排测试及28项浏览器工作流；该结果不等于Linux已通过。下一步需将当前PR分支更新后读取GitHub Actions每个job结果，记录精确提交SHA及Linux结果。
+- 补充前当前本地工作树通过852项业务测试、21项桌面编排测试及本地全量浏览器工作流。更新PR #5分支后，精确提交`c7409f2e2dd4f071ea4e062ca0f2cc32998c30c8`的GitHub Actions push run `37239390585`和PR run `37239393121`均为`success`，两次的backend与browser job均通过。Ubuntu执行了全量业务测试、桌面编排测试、隔离启动/重启、JS语法和浏览器流程，包括本轮补入的三项回归。详见[push run](https://github.com/hyq8216/noonai/actions/runs/37239390585)与[PR run](https://github.com/hyq8216/noonai/actions/runs/37239393121)。
+- 这证明PR当前SHA的Ubuntu CI通过；真实店铺、供应商、模型或银行服务仍未调用。macOS DMG workflow是独立的构建工作流，不纳入此Linux结论。
