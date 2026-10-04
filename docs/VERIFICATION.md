@@ -490,4 +490,5 @@ PUT结果不明后的下一次重试仍先读回同一确定性地址；读回�
 - 核对真实启动路径发现`start()`先对工作目录`.server.lock`取得非阻塞独占锁，之后才执行备份恢复、创建`App`及其`recover_jobs()`。第二服务实例无法并发恢复第一个实例的活动数据库。
 - 将`smoke.py`扩展为真实子进程验证：首个服务运行时，在临时数据库放入合成`submit_dispatching`任务；第二实例退出并报告已有实例，ready file未创建，任务仍为`running`。首实例退出后再启动，任务按未知回执恢复为`interrupted`。该测试没有创建真实卖家请求，也没有使用工作区经营数据。
 - 定向`.venv/bin/python scripts/smoke.py`通过。最终`bash scripts/check.sh`退出0：852项业务测试72.940秒、21项桌面打包编排测试0.725秒；新增的进程互斥/恢复场景通过，JS语法、隔离启动检查、40个导航入口桌面/窄屏检查以及全量浏览器业务流程通过。浏览器均使用临时合成数据，没有真实卖家或供应商请求。`git diff --check`通过。
-- 本次精确本机工作树通过不替代Ubuntu结果；新的smoke测试随下一次PR提交重新运行Linux CI后再补记远端SHA和Actions结果。
+- GitHub Actions对精确SHA `e1f5e0cf9f922f996abd880cb696200567ce20e2`的push run `37240091910`和PR run `37240095331`均为`success`，两个工作流中的backend、browser jobs全部通过。新增smoke场景包含于backend的隔离启动步骤，并验证了不确定写恢复和进程互斥。详见[push run](https://github.com/hyq8216/noonai/actions/runs/37240091910)与[PR run](https://github.com/hyq8216/noonai/actions/runs/37240095331)。
+- 边界：服务进程互斥证明来自本机临时工作目录与合成任务；Noon写入、真实回执和真实店铺仍未验证，`real_noon_verified=false`。
