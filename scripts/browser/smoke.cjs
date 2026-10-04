@@ -150,6 +150,13 @@ print(json.dumps({'rows':len(snapshot['products']),'seed_seconds':round(seed_sec
     for (const view of navigatedViews) {
       const viewStarted = Date.now();
       await navigateTo(view);
+      if (view === 'settings') {
+        const sourcing = page.locator('.settings-row').filter({hasText:'1688 货源'});
+        assert.match(await sourcing.innerText(), /申请开发者与应用/);
+        assert.match(await sourcing.innerText(), /商品搜索\/详情\/规格库存读取权限/);
+        assert.equal(await sourcing.locator('a[href="https://aop.alibaba.com/"]').count(),1);
+        assert.equal(await sourcing.locator('a[href="https://aop.alibaba.com/doc/notice.htm"]').count(),1);
+      }
       if (view === 'products') {
         await page.getByText('共 10000 件 · 第 1 / 200 页 · 每页50件').waitFor();
         catalogPageMs = Date.now() - viewStarted;
