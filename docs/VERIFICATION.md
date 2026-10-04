@@ -558,3 +558,12 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - PR head `49d8b33297c5e9bed319644cfadeb240efac744c` 对应 GitHub Actions run `37202921745`，workflow conclusion 为 success。
 - Ubuntu backend：447项测试通过（88.533秒）；隔离服务启动、调度、写保护、导入去重、持久化及重启检查通过。Browser job 使用真实 Chromium，通过桌面与390px窄屏18个导航目标、铺货/库存/报价/调度、图片权利导入、提交回执、货源候选池以及新增1688设置断言。
 - 该 CI 仅验收PR提交中的软件和合成数据；不代表 macOS 安装包、真实1688授权调用、Noon店铺上架或 Offer 回读，`real_noon_verified=false`。
+
+### 2026-10-04 PR源代码对应的本机全量与macOS打包回归
+
+- 基线核对：本机工作树 HEAD 为 `6351b6dc678baf1380020618396c8d7379b128dc`；逐文件对比后，应用/测试源码与 PR #2 head `07a941e5e52e0b77e62d084d70e9491dfcc8048f` 一致。8个本机标为未跟踪的新增测试/模块文件均与该 PR 对应 Git blob 完全相同。文档差异单独保留；测试没有读取 `workbench/data`，服务和Chromium使用临时数据。
+- 全量：`bash scripts/check.sh` 退出0，447项业务测试通过（64.615秒）；隔离服务启动/调度/无令牌写保护/导入去重/持久化重启通过；真实 Chromium 桌面及390px布局的18个导航目标、铺货只读预检、库存与报价检查、调度、图片权利导入、人工提交回执和货源候选池流程通过。10,000件合成目录快照0.900秒、精确SKU搜索12ms、每页50件分页通过，均为一次本机读数。
+- macOS包：执行 `NOON_BUILD_DIST=/tmp/noon-desktop-package-check desktop/.venv/bin/python desktop/build.py` 成功，构建 Apple Silicon arm64 `.app`（约119MB），Info.plist版本0.42.0、最低系统12.0；构建中的深度严格签名检查及单独 `codesign --verify --deep --strict` 通过。该产物是临时自用开发包，未生成DMG，也未做Developer ID签名/公证。
+- 包内后端：`NOON_VERIFY_APP='/tmp/noon-desktop-package-check/Noon Studio.app' desktop/.venv/bin/python desktop/verify_bundle.py` 退出0。隔离合成流程覆盖采购/收货、订单占用/发货、分次收款、调拨/补货、视觉队列幂等、FFmpeg图组视频、媒体范围读取、重启持久化、备份恢复及回退包下载；没有调用视觉订阅。
+- 原生UI：实际启动该 `.app`，隔离资料目录加载成功；标题正确、默认页面为“批量铺货”、页面取得有效后端状态且无横向溢出。正常退出记录 `dirty=Optional(0); error=nil`。首轮临时检查断言期待旧首页“运营总览”而未通过；按当前默认铺货入口约定修正断言，重跑通过。
+- 边界：这验证本机当前 PR 对应源码、合成数据和开发包；不代表正式DMG、公证发布、1688授权调用、真实Noon刊登或Offer回读，`real_noon_verified=false`。
