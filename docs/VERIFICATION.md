@@ -1266,7 +1266,7 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 
 - 原因：工作流同时监听 `codex/**` 分支的 `push` 与对应 PR 的 `pull_request`，每次功能分支提交会运行两套完整 CI；失败时可能收到重复通知。
 - 调整：push 只保留 `main` 分支；保留 PR 和手动运行，移除每日定时，避免无代码变化时重复检查和失败邮件。功能分支提交只由 PR 事件执行一次完整检查，合并后的 main push 仍会回归。
-- 浏览器失败邮件对应前节记录的 Chromium 瞬时读回竞争：旧 run #98（ID `37265847407`）后端成功，但 Chromium 收尾时读到仍为 `queued` 的第4步；同提交 PR run #99 及后续 #100/#101、#104/#105 均通过。最新 PR run #108（ID `37269813306`）的 backend/browser jobs 均成功。保留 PR/main 完整检查；已产生的失败邮件仍会留在邮箱历史中。
+- 浏览器失败邮件对应前节记录的 Chromium 瞬时读回竞争：旧 run #98（ID `37265847407`）后端成功，但 Chromium 收尾时读到仍为 `queued` 的第4步；同提交 PR run #99 及后续 #100/#101、#104/#105 均通过。删除每日定时运行后的 PR run #109（ID `37270152510`）backend/browser jobs 全部成功。保留 PR/main 完整检查；已产生的失败邮件仍会留在邮箱历史中。
 - 边界：这是 CI 触发次数与失败根因的修正，不修改 GitHub 账号邮件订阅偏好；Noon 应用行为和 `real_noon_verified=false` 不变。
 
 
