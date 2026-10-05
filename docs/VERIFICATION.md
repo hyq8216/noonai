@@ -1299,3 +1299,12 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 验证：新增单测覆盖 active→ready 与 ready→active 两种转换。旧预览的 apply 均返回409；前一场景可重新预览后变为可处理，后一场景确认没有建立目录批次回执且原有任务仍只有一条商品记录。
 - 全量：bash scripts/check.sh 退出0，530项业务测试通过（73.792秒）；隔离启动/调度/写保护/导入去重/持久化重启、JavaScript语法及真实 Chromium 桌面与390px移动端 smoke通过。10,000 SKU 全量快照1.004秒、精确 SKU 搜索54毫秒、50项分页通过。该次读数高于前几轮（快照约0.75秒、搜索12至13毫秒），测试仍通过，当前证据不足以判定稳定性能回退。
 - 边界：仅使用临时数据和合成商品；没有真实模型或 Noon 店铺请求，real_noon_verified=false。
+
+
+### 2026-10-05 GitHub Actions 邮件触发与浏览器读回时序收敛
+
+- 根因：旧 run #98（ID 37265847407）的 backend 成功；真实 Chromium 在自动化收尾阶段读到模型调用已完成、但流程项仍为 queued，10秒等待后误判失败。相同流程的 run #99、#100/#101、#104/#105 与最新 run #109 均成功，属于调度收尾的时序波动。
+- 调整：移除每日 cron，保留 main push、PR 和手动检查；功能分支 push 不再与 PR 重复执行。Chromium 持久化状态轮询从10秒扩大至30秒，并继续对 attention、cancelled 或持续未完成状态失败；保留商品未批准和零Noon写入断言。
+- 本机验证：bash scripts/check.sh 退出0，530项业务测试、隔离启动/重启及桌面/390px真实 Chromium smoke 全部通过。Workflow YAML 解析及 main/PR/manual 无 schedule 触发断言通过。
+- GitHub Actions run #110（ID 37270368131）验证取消每日定时后的工作流配置，backend/browser 均成功。时序调整后的云端复验待下一次 PR run；PR #6 仍为草稿且未合并。
+- 邮件边界：每日无改动触发已移除；GitHub 个人通知偏好无法从仓库工作流更改，已投递邮件仍保留在邮箱历史。仅使用合成数据，real_noon_verified=false。
