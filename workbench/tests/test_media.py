@@ -1,5 +1,6 @@
 """Real image/video pipeline tests; no external model or marketplace calls."""
 import io
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PIL import Image
+from PIL import Image,ImageDraw
 from core import Store, Problem
 from media import Media, ffmpeg, probe_video
 from server import App, Handler, ThreadingHTTPServer
@@ -49,6 +50,18 @@ class MediaTests(unittest.TestCase):
         p=self.root/'bad.png';p.write_bytes(b'not an image')
         with self.assertRaises(Problem):self.media.ingest(p,'bad.png','test')
         self.assertEqual(len(self.media.state()['assets']),1)
+    def test_ingest_metadata_and_hash_match_the_exact_source_snapshot(self):
+        source=self.root/'mutable.png';Image.new('RGB',(800,600),'red').save(source)
+        replacement=io.BytesIO();Image.new('RGB',(320,320),'blue').save(replacement,'PNG');replacement_bytes=replacement.getvalue()
+        original_info=__import__('media').image_info
+        def replace_after_validation(path):
+            info=original_info(path);source.write_bytes(replacement_bytes);return info
+        with patch('media.image_info',side_effect=replace_after_validation):
+            asset=self.media.ingest(source,'mutable.png','synthetic fixture rights')
+        stored=self.media.root/asset['file'];stored_bytes=stored.read_bytes()
+        with Image.open(stored) as image:actual_size=image.size
+        self.assertEqual((asset['width'],asset['height']),actual_size)
+        self.assertEqual(asset['sha256'],hashlib.sha256(stored_bytes).hexdigest())
     def test_templates_and_exact_product_attachment(self):
         a=self.image()
         for kind,size in [('square',(1600,1600)),('portrait',(1600,2000)),('feature',(1600,1600))]:
@@ -65,6 +78,24 @@ class MediaTests(unittest.TestCase):
             with self.assertRaises(Problem):self.media.attach({'asset_id':a['id'],'product_id':p['id'],'revision':p['revision']})
             self.assertEqual(before,set(self.store.assets.iterdir()))
             with self.assertRaises(Problem):self.media.attach({'asset_id':out['id'],'product_id':p['id'],'revision':updated['revision']})
+
+    def test_arabic_feature_template_uses_fallback_without_raqm(self):
+        a=self.image()
+        with patch('media.features.check',return_value=False):
+            task=self.wait(self.submit('feature',[a],title='منتج عالي الجودة',caption='تفاصيل المنتج للاستخدام اليومي'))
+        out=self.media.get(task['result'][0])
+        with Image.open(self.media.root/out['file']) as rendered:
+            title=rendered.crop((80,1160,1520,1310)).convert('L').point(lambda value:255 if value<180 else 0)
+            caption=rendered.crop((80,1350,1520,1550)).convert('L').point(lambda value:255 if value<180 else 0)
+            self.assertIsNotNone(title.getbbox());self.assertLess(title.getbbox()[3],75)
+            self.assertIsNotNone(caption.getbbox());self.assertLess(caption.getbbox()[3],55)
+            self.assertEqual(rendered.size,(1600,1600))
+        from media import draw_text
+        canvas=Image.new('RGB',(300,180),'white')
+        with patch('media.features.check',return_value=False):
+            draw_text(ImageDraw.Draw(canvas),'المنتج'*8,(0,0,300,180),24)
+        ink=canvas.convert('L').point(lambda value:255 if value<180 else 0).getbbox()
+        self.assertIsNotNone(ink);self.assertGreater(ink[0],0);self.assertLessEqual(ink[2],300);self.assertLessEqual(ink[3],180)
     def test_batch_atomic_idempotent_pause_cancel_retry(self):
         a=self.image();self.media.control({'action':'pause'})
         b={'request_id':'same','recipes':[{'kind':'square','asset_ids':[a['id']]}]}

@@ -1,6 +1,6 @@
 """Supplier cost/availability refresh; never changes warehouse stock or platform offers."""
 import json
-from core import Problem,clean
+from core import Problem,clean,source_identity_keys
 from source_import import SourceImport,ALIASES,LABELS,digest
 
 class SourceUpdates(SourceImport):
@@ -27,7 +27,7 @@ class SourceUpdates(SourceImport):
                 if partner:
                     matches=c.execute("SELECT * FROM products WHERE json_extract(data,'$.partner_sku')=?",(partner,)).fetchall()
                 elif url:
-                    matches=c.execute('SELECT * FROM products WHERE source_key=?',(url+'|'+sku,)).fetchall()
+                    matches=c.execute('SELECT * FROM products WHERE source_key IN (?,?)',source_identity_keys(url,sku)).fetchall()
                 else:raise Problem('请提供工作台SKU，或完整货源链接与对应规格货号')
                 if len(matches)!=1:raise Problem('没有唯一匹配商品；请核对工作台SKU或货源链接与规格货号')
                 p=self.store.unpack(matches[0]);row.update(title=p['title_zh'],product_id=p['id'],revision=p['revision'],partner_sku=p['partner_sku'],values=patch)

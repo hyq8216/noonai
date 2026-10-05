@@ -3,6 +3,7 @@ import base64
 import http.cookiejar
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -10,6 +11,21 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPCookieProcessor, HTTPRedirectHandler
 from urllib.parse import urlsplit,quote
 from core import Problem
+
+class RateLimited(Problem):
+    """An explicit HTTP 429 response; safe to report separately, never auto-retry."""
+    def __init__(self,retry_after_seconds=None,request_id=None):
+        self.retry_after_seconds=retry_after_seconds
+        self.request_id=request_id
+        wait=(f'请至少等待 {retry_after_seconds} 秒后再由人工决定是否重试。'
+              if retry_after_seconds is not None else '请等待限额恢复后再由人工决定是否重试。')
+        trace=f' 请求编号：{request_id}。' if request_id else ''
+        super().__init__(f'外部服务明确返回 HTTP 429 限流；本次不会自动重发。{wait}{trace}',429)
+
+class UncertainExternalCall(Problem):
+    """The request may have reached the service, but no reliable receipt arrived."""
+    def __init__(self,message='外部服务连接失败或超时。请求可能已送达；请先核对服务记录再重试。'):
+        super().__init__(message,502)
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -41,9 +57,24 @@ def request_json(url, body, headers=None, opener=None, method='POST'):
             return json.loads(raw)
     except HTTPError as e:
         # Never expose provider responses which may contain credentials or source text.
+        if e.code==429:
+            try:
+                value=e.headers.get('X-Ratelimit-Retry-After')
+                retry_after=int(value) if value is not None else None
+                if retry_after is not None and not 0<=retry_after<=604800:retry_after=None
+            except (TypeError,ValueError,AttributeError):retry_after=None
+            try:
+                request_id=e.headers.get('X-Request-Id')
+                if not isinstance(request_id,str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',request_id):request_id=None
+            except (AttributeError,TypeError):request_id=None
+            e.close()
+            raise RateLimited(retry_after,request_id)
+        e.close()
+        if e.code>=500:
+            raise UncertainExternalCall(f'外部服务返回 HTTP {e.code}，处理结果可能不确定；请先核对服务记录再重试。')
         raise Problem(f'外部服务返回 HTTP {e.code}。请检查权限、额度和服务配置。',502)
     except (URLError,TimeoutError,OSError):
-        raise Problem('连接外部服务失败或超时。提交任务请先核对平台结果再重试。',502)
+        raise UncertainExternalCall()
     except (ValueError,KeyError):
         raise Problem('外部服务返回格式不符合约定',502)
 
@@ -77,7 +108,8 @@ def translate(p,preferred_terms=None):
 
 class Noon:
     BASE='https://noon-api-gateway.noon.partners'
-    def __init__(self):
+    def __init__(self,on_rate_limited=None):
+        self.on_rate_limited=on_rate_limited
         path=os.environ.get('NOON_CREDENTIALS_FILE','')
         if not path: raise Problem('尚未配置 noon 店铺凭证',409)
         try:
@@ -87,6 +119,12 @@ class Noon:
         except (OSError,ValueError,TypeError): raise Problem('noon凭证文件无法读取或缺少字段',409)
         self.opener=build_opener(NoRedirect(),HTTPCookieProcessor(http.cookiejar.CookieJar()))
         self.login()
+    def _request_json(self,url,body,headers=None,method='POST'):
+        try:return request_json(url,body,headers,self.opener,method=method)
+        except RateLimited as e:
+            callback=getattr(self,'on_rate_limited',None)
+            if callback:callback(e)
+            raise
     def login(self):
         from cryptography.hazmat.primitives import hashes,serialization
         from cryptography.hazmat.primitives.asymmetric import padding
@@ -98,15 +136,15 @@ class Noon:
             key=serialization.load_pem_private_key(self.creds['private_key'].encode(),password=None)
             signature=key.sign(message,padding.PKCS1v15(),hashes.SHA256())
         except (ValueError,TypeError): raise Problem('noon私钥格式无效',409)
-        request_json(self.BASE+'/identity/public/v1/api/login',
-                     {'token':(message+b'.'+b64(signature)).decode(),'default_project_code':self.creds['project_code']},opener=self.opener)
+        self._request_json(self.BASE+'/identity/public/v1/api/login',
+                     {'token':(message+b'.'+b64(signature)).decode()})
     def post(self,path,data):
-        return request_json(self.BASE+path,data,{'X-Project':self.creds['project_code']},self.opener)
+        return self._request_json(self.BASE+path,data,{'X-Project':self.creds['project_code']})
     def categories(self): return self.post('/content/v1/categories/list',{})
     def attributes(self,category): return self.post('/content/v1/categories/attributes/list',{'category_code':category})
     def submit(self,data): return self.post('/content/v1/product/upsert',data)
     def offers(self,partner_sku):
-        return request_json(self.BASE+'/offer/v1/product/'+quote(partner_sku,safe=''),None,{'X-Project':self.creds['project_code'],'Accept':'application/json'},self.opener,method='GET')
+        return self._request_json(self.BASE+'/offer/v1/product/'+quote(partner_sku,safe=''),None,{'X-Project':self.creds['project_code'],'Accept':'application/json'},method='GET')
     def pricing_get_sa(self,partner_sku):
         return self.post('/pricing/v1/pricing/get',{'items':[{'partner_sku':partner_sku,'country_code':'sa'}]})
     def transfer_prices_get(self,partner_skus):

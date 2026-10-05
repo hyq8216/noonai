@@ -7,6 +7,9 @@ def digest(value):return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort
 def selection(b):
     ids=b.get('product_ids')
     if not isinstance(ids,list) or not 1<=len(ids)<=500 or any(not isinstance(i,str) or not i for i in ids) or len(ids)!=len(set(ids)):raise Problem('请选择1至500个不同商品')
+    try:
+        for value in ids:value.encode('utf-8')
+    except UnicodeEncodeError:raise Problem('商品编号含有无效Unicode字符，请重新选择')
     return sorted(ids)
 
 class PlatformBatch:

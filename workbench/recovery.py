@@ -14,8 +14,10 @@ import tempfile
 import threading
 import zipfile
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from core import Problem, ident, now
+from backup_agent import sync_launch_agent, _locked, release_schedule_lock
 
 FORMAT=1
 MAX_ARCHIVE=2*1024**3
@@ -43,18 +45,22 @@ CREATE INDEX IF NOT EXISTS idx_jobs_visual_check_status_created ON jobs(kind,sta
 CREATE INDEX IF NOT EXISTS idx_jobs_visual_check_source ON jobs(json_extract(result,'$.visual_job_id')) WHERE kind='visual-check';
 CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status,updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at DESC);
+CREATE TABLE IF NOT EXISTS runtime_state (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
 '''
 
 def compatible_legacy_schema(saved,expected):
     if not isinstance(saved,list) or any(not isinstance(row,list) or len(row)!=4 or not isinstance(row[1],str) for row in saved):return False
     present={row[1] for row in saved}
     missing_indexes={name for name in MIGRATION_INDEXES if name not in present}
+    runtime_variants=((),('runtime_state',))
     inbox_variants=[(),('source_inbox_config','source_inbox_files'),('source_inbox_video_config',),
         ('source_inbox_visual_config','source_inbox_video_config'),
         ('source_inbox_config','source_inbox_files','source_inbox_visual_config','source_inbox_video_config')]
-    return any(saved==[row for row in expected if row[1] not in missing_indexes.union(missing_inbox,missing_terms,missing_budget,missing_presets,missing_leads)]
+    inbox_variants += [variant+('source_inbox_cursor',) for variant in inbox_variants]
+    return any(saved==[row for row in expected if row[1] not in missing_indexes.union(missing_inbox,missing_terms,missing_budget,missing_presets,missing_leads,missing_runtime)]
                for missing_inbox in inbox_variants for missing_terms in ((),('model_terms',))
-               for missing_budget in ((),('visual_budget',)) for missing_presets in ((),('visual_presets',))
+               for missing_budget in ((),('visual_budget',)) for missing_presets in ((),('visual_presets',)) for missing_runtime in runtime_variants
                for missing_leads in ((),('source_leads',)))
 ASSET=re.compile(r'(assets|media)/[a-f0-9]{32}(?:-source|-preview)?\.(jpg|png|webp|mp4|webm)\Z')
 INBOX=re.compile(r'(?:source-inbox/(?:updates/)?[^/\\]{1,255}\.(?:csv|json)|source-inbox/photos/[A-Za-z0-9._-]{1,100}/(?:rights\.txt|references\.txt|[A-Za-z0-9._-]{1,250}\.(?:jpg|jpeg|png|webp))|source-inbox/videos/[A-Za-z0-9._-]{1,100}/(?:rights\.txt|[A-Za-z0-9._-]{1,250}\.(?:mp4|mov|webm)))\Z',re.IGNORECASE)
@@ -64,6 +70,13 @@ def digest(path):
     with Path(path).open('rb') as f:
         for block in iter(lambda:f.read(1024*1024),b''):h.update(block)
     return h.hexdigest()
+
+def created_at_utc(value):
+    """Parse archived timestamps consistently, including older offset-bearing manifests."""
+    if not isinstance(value,str):raise ValueError('备份时间格式无效')
+    parsed=datetime.fromisoformat(value)
+    if parsed.tzinfo is None:parsed=parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 def write_json(path,value):
     path=Path(path);tmp=path.with_suffix('.tmp')
@@ -105,28 +118,251 @@ class Recovery:
         self.root=Path(root);self.home=self.root/'recovery';self.home.mkdir(mode=0o700,exist_ok=True);self.home.chmod(0o700)
         self.archives=self.home/'archives';self.imports=self.home/'imports'
         self.archives.mkdir(exist_ok=True);self.imports.mkdir(exist_ok=True)
-        self.pending=self.home/'pending.json';self.result=self.home/'last-restore.json';self.lock=threading.RLock()
+        self.staging=self.home/'.staging'
+        if self.staging.is_symlink():raise Problem('备份临时目录不能是快捷链接')
+        self.staging.mkdir(mode=0o700,exist_ok=True);self.staging.chmod(0o700)
+        self.pending=self.home/'pending.json';self.result=self.home/'last-restore.json';self.schedule_file=self.home/'schedule.json';self.lock=threading.RLock()
+        self.clock=lambda:datetime.now(timezone.utc);self.stop=threading.Event();self.thread=None
+        if not self.schedule_file.exists():write_json(self.schedule_file,self.default_schedule())
         if expected is None:
             with closing(sqlite3.connect(self.root/'workbench.sqlite3')) as c:expected=schema(c)
         self.expected=expected
+    def default_schedule(self):
+        return {'enabled':False,'interval_hours':24,'keep_count':7,'next_run_at':None,'last_run_at':None,'last_backup_id':None,'last_error':None,'status':'disabled','background_agent':'application_only'}
+    def _schedule(self):
+        try:
+            if self.schedule_file.is_symlink():raise ValueError('设置文件是符号链接')
+            value=json.loads(self.schedule_file.read_text())
+            if not isinstance(value,dict) or type(value.get('enabled')) is not bool:raise ValueError('设置结构无效')
+            merged={**self.default_schedule(),**value}
+            if (type(merged['interval_hours']) is not int or merged['interval_hours'] not in (6,12,24,48,168)
+                or type(merged['keep_count']) is not int or not 1<=merged['keep_count']<=100
+                or merged['status'] not in ('disabled','scheduled','running','interrupted','success','failed')):raise ValueError('周期或保留策略无效')
+            if merged['enabled']:
+                due=datetime.fromisoformat(merged['next_run_at'])
+                if due.tzinfo is None:raise ValueError('执行时间缺少时区')
+            return merged
+        except (ValueError,OSError,TypeError,KeyError):pass
+        return {**self.default_schedule(),'status':'failed','last_error':'定时备份设置文件无效，已暂停；请重新保存策略'}
+    def configure_schedule(self,body):
+        if not isinstance(body,dict) or type(body.get('enabled')) is not bool:raise Problem('请明确选择是否启用定时备份')
+        interval=body.get('interval_hours',24);keep=body.get('keep_count',7)
+        if type(interval) is not int or interval not in (6,12,24,48,168):raise Problem('备份周期需为6、12、24、48或168小时')
+        if type(keep) is not int or not 1<=keep<=100:raise Problem('定时备份保留份数需为1到100')
+        fd=_locked(self.home/'.backup-agent.lock')
+        if fd is None:raise Problem('已有备份正在执行，请稍后修改定时策略',409)
+        try:
+            with self.lock:
+                if self.pending.exists():raise Problem('已安排资料恢复，暂不能修改定时备份')
+                current=self._schedule();enabled=body['enabled']
+                current.update(enabled=enabled,interval_hours=interval,keep_count=keep,
+                    next_run_at=(self.clock()+timedelta(hours=interval)).isoformat() if enabled else None,
+                    last_error=None,status='scheduled' if enabled else 'disabled')
+                write_json(self.schedule_file,current)
+                try:
+                    current['background_agent']=sync_launch_agent(self.root,enabled)
+                except Problem as exc:
+                    failed={**current,'enabled':False,'next_run_at':None,'status':'failed','background_agent':'registration_failed','last_error':str(exc)[:300]}
+                    write_json(self.schedule_file,failed)
+                    raise
+                write_json(self.schedule_file,current)
+                return current
+        finally:release_schedule_lock(fd)
+    def tick_schedule(self,lock_held=False):
+        fd=None
+        if not lock_held:
+            fd=_locked(self.home/'.backup-agent.lock')
+            if fd is None:return False
+        try:return self._tick_schedule_serialized()
+        finally:release_schedule_lock(fd)
+    def _tick_schedule_serialized(self):
+        with self.lock:
+            schedule=self._schedule()
+            if not schedule.get('enabled') or not schedule.get('next_run_at'):return False
+            try:due=datetime.fromisoformat(schedule['next_run_at'])<=self.clock()
+            except (TypeError,ValueError):due=True
+            if not due:return False
+            started=self.clock();schedule.update(status='running',last_error=None,next_run_at=(started+timedelta(hours=schedule['interval_hours'])).isoformat());write_json(self.schedule_file,schedule)
+            archive=None
+            try:
+                archive=self.create('scheduled',_lock_held=True)
+                schedule.update(last_backup_id=archive['id'])
+                deleted=self._prune_scheduled(schedule['keep_count'],archive['id'])
+                schedule.update(status='success',last_run_at=started.isoformat(),last_error=None,last_pruned_count=deleted)
+            except Exception as e:
+                schedule.update(status='failed',last_run_at=started.isoformat(),last_error=str(e)[:300],last_pruned_count=0)
+                if archive:schedule['last_backup_id']=archive['id']
+            write_json(self.schedule_file,schedule)
+            return True
+    def _prune_scheduled(self,keep,protected_id):
+        records=[]
+        for f in self.archives.glob('*.json'):
+            try:
+                if f.is_symlink():continue
+                value=json.loads(f.read_text());key=value['id'];path=self.archives/(key+'.zip')
+                created=created_at_utc(value.get('created_at'))
+                if value.get('label')=='scheduled' and re.fullmatch('[a-f0-9]{32}',key) and f.name==key+'.json' and path.is_file() and not path.is_symlink():records.append((created,key,f,path))
+            except (ValueError,KeyError,OSError,TypeError):continue
+        records.sort(reverse=True)
+        protected=[r for r in records if r[1]==protected_id]
+        if not protected:raise Problem('新定时备份未出现在保留清单中，已停止清理')
+        retained=protected+ [r for r in records if r[1]!=protected_id][:keep-1]
+        retained_ids={r[1] for r in retained};candidates=[r for r in records if r[1] not in retained_ids]
+        for _,_,_,path in candidates:self.validate(path)
+        for _,_,meta,path in candidates:
+            meta.unlink()
+            path.unlink()
+        return len(candidates)
+    def start(self):
+        if self.thread and self.thread.is_alive():return
+        self.stop.clear()
+        self.cleanup_interrupted_work()
+        schedule=self._schedule()
+        try:
+            schedule['background_agent']=sync_launch_agent(self.root,bool(schedule.get('enabled')))
+            if schedule.get('background_agent')=='registered':schedule['last_error']=None
+        except Problem as exc:
+            schedule['background_agent']='registration_failed'
+            schedule['last_error']=str(exc)[:300]
+        write_json(self.schedule_file,schedule)
+        if schedule.get('enabled') and schedule.get('status')=='running':
+            schedule.update(status='interrupted',last_error='应用在定时备份过程中关闭；将尽快重新执行',next_run_at=self.clock().isoformat());write_json(self.schedule_file,schedule)
+        self.thread=threading.Thread(target=self._schedule_loop,name='backup-scheduler',daemon=True);self.thread.start()
+    def close(self):
+        self.stop.set()
+        if self.thread:self.thread.join(timeout=65)
+    def _schedule_loop(self):
+        while not self.stop.wait(30):
+            try:self.tick_schedule()
+            except Exception:continue
+    def _clear_staging_locked(self):
+        if self.staging.is_symlink() or not self.staging.is_dir():
+            raise Problem('备份临时目录无法安全访问')
+        removed=0
+        for path in self.staging.iterdir():
+            if path.is_symlink() or path.is_file():path.unlink()
+            elif path.is_dir():shutil.rmtree(path)
+            else:continue
+            removed+=1
+        # Prior versions staged work directly in recovery/ using tempfile's
+        # default tmpXXXXXXXX names. Clean only that exact private-app pattern.
+        for path in self.home.iterdir():
+            if path == self.staging or not re.fullmatch(r'tmp[a-z0-9_]{8}',path.name):continue
+            if path.is_symlink() or not path.is_dir():continue
+            shutil.rmtree(path);removed+=1
+        return removed
+    def cleanup_interrupted_work(self):
+        """Remove abandoned snapshot/validation work while holding both locks."""
+        fd=_locked(self.home/'.backup-agent.lock')
+        if fd is None:return 0
+        try:
+            with self.lock:return self._clear_staging_locked()
+        finally:release_schedule_lock(fd)
     def state(self):
         records=[]
         for f in self.archives.glob('*.json'):
             try:
+                if f.is_symlink():continue
                 v=json.loads(f.read_text())
-                if (self.archives/(v['id']+'.zip')).is_file():records.append(v)
-            except (ValueError,KeyError,OSError):continue
-        return {'archives':sorted(records,key=lambda r:r['created_at'],reverse=True)[:50],
+                if (not isinstance(v,dict) or not isinstance(v.get('id'),str)
+                    or not re.fullmatch('[a-f0-9]{32}',v['id']) or f.name!=v['id']+'.json'
+                    or not isinstance(v.get('created_at'),str) or type(v.get('bytes')) is not int
+                    or v['bytes']<0 or not isinstance(v.get('counts'),dict)):continue
+                created_at_utc(v['created_at'])
+                archive=self.archives/(v['id']+'.zip')
+                if archive.is_file() and not archive.is_symlink():records.append(v)
+            except (ValueError,KeyError,OSError,TypeError):continue
+        records=sorted(records,key=lambda r:(created_at_utc(r['created_at']),r['id']),reverse=True)
+        archive_files=[p for p in self.archives.glob('*.zip') if p.is_file() and not p.is_symlink()]
+        bytes_used=sum(p.stat().st_size for p in archive_files)
+        paired={r['id'] for r in records}
+        orphan_count=sum(1 for p in archive_files if p.stem not in paired)
+        newest=records[0] if records else None
+        try:age_seconds=max(0,int((created_at_utc(self.clock().isoformat())-created_at_utc(newest['created_at'])).total_seconds())) if newest else None
+        except (TypeError,ValueError):age_seconds=None
+        try:
+            disk=shutil.disk_usage(self.home)
+            expanded=newest.get('expanded_bytes') if newest else None
+            required=2*expanded+64*1024**2 if type(expanded) is int and expanded>=0 else None
+            disk_state={'total_bytes':disk.total,'free_bytes':disk.free,'estimated_required_bytes':required,
+                        'sufficient_for_recent_backup_size':disk.free>=required if required is not None else None}
+        except OSError:disk_state={'total_bytes':None,'free_bytes':None,'estimated_required_bytes':None,'sufficient_for_recent_backup_size':None}
+        schedule=self._schedule();schedule_overdue=False
+        if schedule.get('enabled') and schedule.get('next_run_at'):
+            try:schedule_overdue=datetime.fromisoformat(schedule['next_run_at'])<=self.clock()
+            except (TypeError,ValueError):schedule_overdue=True
+        return {'archives':records[:50],
+                'archive_count':len(archive_files),'archive_bytes':bytes_used,
+                'oldest_archive_at':records[-1]['created_at'] if records else None,
+                'newest_archive_at':newest['created_at'] if newest else None,'newest_archive_age_seconds':age_seconds,
+                'unpaired_archive_count':orphan_count,
                 'pending':{k:v for k,v in json.loads(self.pending.read_text()).items() if k!='schema'} if self.pending.exists() else None,
                 'last_restore':json.loads(self.result.read_text()) if self.result.exists() else None,
+                'schedule':schedule,'schedule_overdue':schedule_overdue,'disk':disk_state,
                 'directory':str(self.archives),'max_archive_bytes':MAX_ARCHIVE}
+    def retention_preview(self,keep=10):
+        if type(keep) is not int or not 1<=keep<=1000:raise Problem('保留数量需为1到1000之间的整数')
+        records=[]
+        with self.lock:
+            for f in self.archives.glob('*.json'):
+                try:
+                    if f.is_symlink():continue
+                    v=json.loads(f.read_text());key=v['id'];created=v['created_at']
+                    parsed_created=created_at_utc(created)
+                    if not re.fullmatch('[a-f0-9]{32}',key) or f.name!=key+'.json':continue
+                    path=self.archives/(key+'.zip')
+                    if path.is_file() and not path.is_symlink():records.append((parsed_created,{**v,'bytes':path.stat().st_size}))
+                except (ValueError,KeyError,OSError,TypeError):continue
+            records.sort(key=lambda item:(item[0],item[1]['id']),reverse=True)
+            ordered=[item[1] for item in records]
+            retained=ordered[:keep];candidates=ordered[keep:]
+            return {'keep':keep,'archive_count':len(records),'retained_count':len(retained),
+                    'candidate_count':len(candidates),'candidate_bytes':sum(r['bytes'] for r in candidates),
+                    'retained':[{'id':r['id'],'created_at':r['created_at'],'bytes':r['bytes'],'label':r.get('label','')} for r in retained],
+                    'candidates':[{'id':r['id'],'created_at':r['created_at'],'bytes':r['bytes'],'label':r.get('label','')} for r in candidates],
+                    'deletes_nothing':True}
     def archive_path(self,key):
         if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{32}',key):raise Problem('备份编号无效')
         path=self.archives/(key+'.zip')
-        if not path.is_file():raise Problem('备份不存在',404)
+        meta=self.archives/(key+'.json')
+        if not path.is_file() or path.is_symlink() or not meta.is_file() or meta.is_symlink():raise Problem('备份不存在',404)
+        try:
+            record=json.loads(meta.read_text())
+            if (not isinstance(record,dict) or record.get('id')!=key
+                or not isinstance(record.get('created_at'),str)
+                or type(record.get('bytes')) is not int or record['bytes']<0
+                or not isinstance(record.get('counts'),dict)):
+                raise ValueError('invalid archive receipt')
+            created_at_utc(record['created_at'])
+        except (OSError,ValueError,TypeError,json.JSONDecodeError):
+            raise Problem('备份不存在',404)
         return path
-    def create(self,label='manual'):
-        with self.lock,tempfile.TemporaryDirectory(dir=self.home) as tmp:
+    def restore_metrics(self,p,finished_at=None):
+        finished=datetime.fromisoformat(finished_at) if finished_at else self.clock()
+        started_value=p.get('restore_started_at') or p.get('scheduled_at')
+        result={}
+        try:
+            started=datetime.fromisoformat(started_value)
+            source=datetime.fromisoformat(p['created_at'])
+            if started.tzinfo is None:started=started.replace(tzinfo=timezone.utc)
+            if source.tzinfo is None:source=source.replace(tzinfo=timezone.utc)
+            if finished.tzinfo is None:finished=finished.replace(tzinfo=timezone.utc)
+            result['restore_duration_seconds']=max(0,int((finished-started).total_seconds()))
+            result['backup_age_at_restore_seconds']=max(0,int((started-source).total_seconds()))
+        except (TypeError,ValueError,KeyError):pass
+        return result
+    def create(self,label='manual',_lock_held=False):
+        fd=None
+        if not _lock_held:
+            fd=_locked(self.home/'.backup-agent.lock')
+            if fd is None:raise Problem('已有备份正在执行，请稍后重试',409)
+        try:
+            with self.lock:
+                self._clear_staging_locked()
+                return self._create_locked(label)
+        finally:release_schedule_lock(fd)
+    def _create_locked(self,label):
+        with self.lock,tempfile.TemporaryDirectory(dir=self.staging,prefix='tmp-archive-') as tmp:
             tmp=Path(tmp);db=tmp/'workbench.sqlite3'
             with closing(sqlite3.connect(self.root/'workbench.sqlite3')) as src,closing(sqlite3.connect(db)) as dst:src.backup(dst)
             files,counts=inspect_database(db,self.expected)
@@ -184,7 +420,7 @@ class Recovery:
             # Read every member, check references and SQLite before exposing a backup.
             self.validate(out)
             result={k:manifest[k] for k in ('created_at','app_version','counts')}
-            result.update(id=key,label=label,bytes=out.stat().st_size,sha256=digest(out),files=len(entries))
+            result.update(id=key,label=label,bytes=out.stat().st_size,expanded_bytes=sizes,sha256=digest(out),files=len(entries))
             dest=self.archives/(key+'.zip');os.chmod(out,0o600);os.replace(out,dest)
             write_json(self.archives/(key+'.json'),result)
             return result
@@ -205,7 +441,7 @@ class Recovery:
                 if m.get('format')!=FORMAT or (m.get('schema')!=self.expected and not migrate_schema):raise Problem('备份格式或数据结构与此版本不兼容')
                 if set(m['files'])!=set(names)-{'manifest.json'} or 'workbench.sqlite3' not in m['files']:raise Problem('备份清单与实际文件不一致')
                 if shutil.disk_usage(self.home).free<sum(i.file_size for i in infos)+64*1024**2:raise Problem('磁盘空间不足以检查备份')
-                with tempfile.TemporaryDirectory(dir=self.home) as tmp:
+                with tempfile.TemporaryDirectory(dir=self.staging,prefix='tmp-validate-') as tmp:
                     target=Path(destination) if destination else Path(tmp)
                     target.mkdir(parents=True,exist_ok=True)
                     for name,entry in m['files'].items():
@@ -287,7 +523,7 @@ class Recovery:
             if saved.exists():
                 remove_component(current);os.replace(saved,current)
             elif name not in p['original_components']:remove_component(current)
-        write_json(self.result,{'status':'rolled_back','finished_at':now(),'message':'恢复切换中断，已退回切换前资料；请检查后重新导入备份。','rollback_archive_id':p['rollback_archive_id']})
+        finished=now();write_json(self.result,{'status':'rolled_back','finished_at':finished,'message':'恢复切换中断，已退回切换前资料；请检查后重新导入备份。','rollback_archive_id':p['rollback_archive_id'],**self.restore_metrics(p,finished)})
         self.pending.unlink(missing_ok=True)
     def apply_pending(self):
         """Called with the workspace process lock, before any App/worker is created."""
@@ -296,6 +532,8 @@ class Recovery:
         if p['phase']=='switching':self.rollback(p);return
         if p['phase']=='committed':
             self.finish(p);return
+        if not p.get('restore_started_at'):
+            p['restore_started_at']=self.clock().isoformat();write_json(self.pending,p)
         try:
             archive=self.imports/(p['id']+'.zip')
             if digest(archive)!=p['sha256']:raise Problem('待恢复文件已改变，原资料未替换')
@@ -320,8 +558,8 @@ class Recovery:
             if p['phase']=='switching':self.rollback(p)
             elif p['phase']=='committed':raise  # Keep the journal; next startup completes the success record.
             else:
-                write_json(self.result,{'status':'failed','finished_at':now(),'message':str(e) if isinstance(e,Problem) else '恢复检查未通过，原资料未替换；请检查磁盘空间和备份文件。'})
+                finished=now();write_json(self.result,{'status':'failed','finished_at':finished,'message':str(e) if isinstance(e,Problem) else '恢复检查未通过，原资料未替换；请检查磁盘空间和备份文件。',**self.restore_metrics(p,finished)})
                 self.pending.unlink(missing_ok=True)
     def finish(self,p):
-        write_json(self.result,{'status':'restored','finished_at':now(),'source_created_at':p['created_at'],'rollback_archive_id':p['rollback_archive_id'],'message':'资料已恢复。自动化队列已暂停、模型服务已停用、商品上架审核已重置，请核对真实平台状态后再启用。'})
+        finished=now();write_json(self.result,{'status':'restored','finished_at':finished,'source_created_at':p['created_at'],'rollback_archive_id':p['rollback_archive_id'],'message':'资料已恢复。自动化队列已暂停、模型服务已停用、商品上架审核已重置，请核对真实平台状态后再启用。',**self.restore_metrics(p,finished)})
         self.pending.unlink(missing_ok=True)

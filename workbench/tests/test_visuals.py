@@ -10,7 +10,7 @@ from datetime import datetime,timedelta,timezone
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from PIL import Image
+from PIL import Image,ImageDraw
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from core import Store,Problem
 from media import Media
@@ -48,16 +48,32 @@ for line in sys.stdin:
  send({'id':rid,'result':r})
 '''
 
+def synthetic_output(path,size=(1600,1600),color=(65,76,89)):
+ """Distinct, high-resolution white-background fixture accepted by local QC."""
+ image=Image.new('RGB',size,'white')
+ draw=ImageDraw.Draw(image)
+ w,h=size
+ draw.polygon([(w*.28,h*.3),(w*.72,h*.3),(w*.8,h*.68),(w*.2,h*.68)],fill=color)
+ image.save(path)
+ return path
+
+def synthetic_noise_output(path):
+ image=Image.new('RGB',(1600,1600),'white')
+ noise=Image.frombytes('RGB',(900,900),os.urandom(900*900*3))
+ image.paste(noise,(350,350));noise.close();image.save(path)
+ return path
+
 class VisualTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.store=Store(self.root/'data');self.media=Media(self.store);self.codex=CodexSubscription();self.v=Visuals(self.store,self.media,self.codex)
   self.kick=patch.object(self.v,'kick');self.kick.start()
   self.pid=self.store.import_rows([{'title_zh':'测试商品','facts':'黑色；5件；8cm','brand':'无品牌'}])['created'][0]
   self.source=self.root/'source.png';Image.new('RGB',(1600,1600),'gray').save(self.source)
+  self.output=synthetic_output(self.root/'output.png')
   self.a=self.media.ingest(self.source,'测试参考原图','测试自制素材',self.pid)
   self.binary=self.root/'codex';self.binary.write_text('#!'+sys.executable+'\n'+FAKE);self.binary.chmod(0o700)
   self.find=patch('codex_subscription.executable',return_value=str(self.binary));self.find.start()
-  self.env=patch.dict(os.environ,{'NOON_VISUAL_FILE':str(self.source),'NOON_VISUAL_MODE':'ok','OPENAI_API_KEY':'must-not-be-used'});self.env.start()
+  self.env=patch.dict(os.environ,{'NOON_VISUAL_FILE':str(self.output),'NOON_VISUAL_MODE':'ok','OPENAI_API_KEY':'must-not-be-used'});self.env.start()
  def tearDown(self):
   self.codex.close();self.v.close();self.media.close();self.env.stop();self.find.stop();self.kick.stop();self.tmp.cleanup()
  def request(self,**extra):return {'request_id':'batch-one','product_id':self.pid,'revision':self.store.get(self.pid)['revision'],'asset_ids':[self.a['id']],'shots':['hero'],'confirmed':True,'locked_features':'5件黑色商品，形状和尺寸不变','style':'柔和棚拍',**extra}
@@ -72,6 +88,16 @@ class VisualTests(unittest.TestCase):
    with self.assertRaises(Problem):self.v.submit(self.request(**extra))
   p2=self.store.import_rows([{'title_zh':'另一商品'}])['created'][0]
   with self.assertRaises(Problem):self.v.submit(self.request(request_id='other',product_id=p2))
+ def test_generation_rejects_unencodable_product_and_asset_ids_before_database_lookup(self):
+  for payload in (self.request(product_id='bad-\ud800'),self.request(asset_ids=['bad-\ud800'])):
+   with self.subTest(payload=payload),self.assertRaises(Problem):self.v.submit(payload)
+  with self.store.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM visual_jobs').fetchone()[0],0)
+ def test_direct_submission_uses_canonical_shot_order_and_keeps_briefs_attached(self):
+  result=self.v.submit(self.request(request_id='canonical-order',shots=['detail','hero','model','scene'],shot_briefs={'detail':'Macro only','hero':'Pure white','model':'Fictional adult','scene':'Kitchen'}))
+  jobs=[self.v.get(jid)['recipe'] for jid in result['job_ids']]
+  self.assertEqual([job['shot'] for job in jobs],['hero','scene','model','detail'])
+  self.assertEqual([job['shot_brief'] for job in jobs],['Pure white','Kitchen','Fictional adult','Macro only'])
+  self.assertIn('Pure white',jobs[0]['prompt']);self.assertIn('white background',jobs[0]['prompt'])
  def test_real_protocol_candidate_review_and_attach(self):
   jid=self.job();self.v.drain();j=self.v.get(jid);self.assertEqual(j['status'],'candidate');self.assertTrue(j['dispatched_at']);self.assertEqual(j['trace']['turn_id'],'qa-turn')
   with self.assertRaises(Problem):self.attach(j['asset_id'])
@@ -102,21 +128,21 @@ class VisualTests(unittest.TestCase):
    self.assertNotIn(value,diagnostic_text(value))
   self.assertEqual(len(diagnostic_text('x'*3000)),1200)
  def test_low_resolution_output_preserved_and_cannot_be_approved(self):
-  Image.new('RGB',(1254,1254),'red').save(self.source);jid=self.job();self.v.drain();j=self.v.get(jid)
-  self.assertEqual(j['status'],'output_rejected');a=self.media.get(j['asset_id']);self.assertEqual((self.media.root/a['file']).read_bytes(),self.source.read_bytes());self.assertTrue(self.v.state()['paused'])
+  Image.new('RGB',(1254,1254),'red').save(self.output);jid=self.job();self.v.drain();j=self.v.get(jid)
+  self.assertEqual(j['status'],'output_rejected');a=self.media.get(j['asset_id']);self.assertEqual((self.media.root/a['file']).read_bytes(),self.output.read_bytes());self.assertFalse(self.v.state()['paused'])
   self.assertEqual(j['trace']['diagnostics']['output_width'],1254);self.assertEqual(j['trace']['diagnostics']['output_check'],'rejected')
   with self.assertRaises(Problem):self.review(jid)
   with self.assertRaises(Problem):self.attach(j['asset_id'])
   self.v.control({'action':'discard-output','id':jid});self.assertEqual(self.v.get(jid)['status'],'cancelled');self.assertTrue((self.media.root/a['file']).exists())
   with self.assertRaises(Problem):self.attach(j['asset_id'])
  def test_wrong_aspect_preserved_stops_remaining_batch(self):
-  Image.new('RGB',(2400,1600),'red').save(self.source);jobs=self.v.submit(self.request(shots=['hero','scene']))['job_ids'];self.v.drain()
-  self.assertEqual(self.v.get(jobs[0])['status'],'output_rejected');self.assertEqual(self.v.get(jobs[1])['status'],'queued');self.assertIn('画幅',self.v.get(jobs[0])['message'])
+  Image.new('RGB',(2400,1600),'red').save(self.output);jobs=self.v.submit(self.request(shots=['hero','scene']))['job_ids'];self.v.drain()
+  self.assertEqual(self.v.get(jobs[0])['status'],'output_rejected');self.assertEqual(self.v.get(jobs[1])['status'],'output_rejected');self.assertIn('画幅',self.v.get(jobs[0])['message'])
   with self.assertRaises(Problem):self.review(jobs[0])
  def test_large_image_protocol_not_truncated_at_two_megabytes(self):
-  # Noise is a transport fixture, never a claimed product photograph.
-  Image.frombytes('RGB',(1600,1600),os.urandom(1600*1600*3)).save(self.source)
-  self.assertGreater(self.source.stat().st_size,2_000_000)
+  # Preserve a white hero perimeter while making the transport payload noisy.
+  synthetic_noise_output(self.output)
+  self.assertGreater(self.output.stat().st_size,2_000_000)
   jid=self.job();self.v.drain();self.assertEqual(self.v.get(jid)['status'],'candidate')
  def test_lost_response_no_automatic_retry_and_batch_paused(self):
   jobs=self.v.submit(self.request(shots=['hero','scene']))['job_ids']
@@ -142,6 +168,32 @@ class VisualTests(unittest.TestCase):
   with self.assertRaises(Problem):self.attach(self.v.get(jid)['asset_id'])
   with self.assertRaises(Problem):self.review(jid)
   self.review(jid,decision='rejected',note='源商品已变更')
+ def test_product_edit_during_successful_generation_preserves_stale_output_held(self):
+  jid=self.job()
+  def generated(rpc,cwd,model,prompt,paths,dispatched,**kwargs):
+   dispatched('qa-thread')
+   p=self.store.get(self.pid);self.store.update(self.pid,{'facts':'6件红色'},p['revision'])
+   return self.output.read_bytes(),{'thread_id':'qa-thread','turn_id':'qa-turn','image_item_id':'qa-image'}
+  with patch('visuals.generate_image',side_effect=generated):self.v.drain()
+  job=self.v.get(jid);self.assertEqual(job['status'],'output_rejected');self.assertIsNotNone(job['asset_id'])
+  asset=self.media.get(job['asset_id']);self.assertEqual((self.media.root/asset['file']).read_bytes(),self.output.read_bytes())
+  self.assertIn('旧版本图片已保留',job['message']);self.assertIn('不可验收或加入商品',job['message'])
+  self.assertEqual(job['trace']['diagnostics']['output_check'],'rejected')
+  self.assertIn('商品规格',job['trace']['diagnostics']['output_check_reason'])
+  with self.assertRaises(Problem):self.review(jid)
+  with self.assertRaises(Problem):self.attach(asset['id'])
+  self.v.control({'action':'discard-output','id':jid});self.assertEqual(self.v.get(jid)['status'],'cancelled')
+ def test_reference_copy_is_hash_checked_before_model_dispatch(self):
+  jid=self.job();original=__import__('shutil').copyfile
+  def corrupt_copy(source,destination):
+   result=original(source,destination)
+   Path(destination).write_bytes(b'concurrently replaced reference')
+   return result
+  with patch('visuals.shutil.copyfile',side_effect=corrupt_copy),patch('visuals.generate_image') as generate:
+   self.v.drain();generate.assert_not_called()
+  job=self.v.get(jid)
+  self.assertEqual(job['status'],'blocked');self.assertIsNone(job['dispatched_at'])
+  self.assertIn('参考原图与已核验版本不一致',job['message'])
  def test_candidate_not_usable_through_template_derivative(self):
   jid=self.job();self.v.drain();aid=self.v.get(jid)['asset_id']
   recipe=self.media.recipe({'kind':'square','asset_ids':[aid]})
@@ -171,7 +223,7 @@ class VisualTests(unittest.TestCase):
   self.assertTrue(self.v.state()['paused'])
  def test_daily_cap_does_not_dispatch_more_images(self):
   jid=self.job()
-  with patch('visuals.DAILY_LIMIT',0),patch.object(self.codex,'session') as session:self.v.drain();session.assert_not_called()
+  with patch.object(self.v,'daily_limit',return_value=0),patch.object(self.codex,'session') as session:self.v.drain();session.assert_not_called()
   self.assertEqual(self.v.get(jid)['status'],'waiting');self.assertIsNone(self.v.get(jid)['dispatched_at']);self.assertIn('retry_at',self.v.get(jid)['trace'])
 
  def wait_until_due(self,jid):
@@ -182,6 +234,34 @@ class VisualTests(unittest.TestCase):
   self.assertEqual(self.v.get(ids[0])['status'],'waiting');self.assertEqual(self.v.get(ids[1])['status'],'queued')
   with patch.object(self.v,'run') as run:self.v.drain();run.assert_not_called()
   self.wait_until_due(ids[0]);self.v.drain();self.assertTrue(all(self.v.get(i)['status']=='candidate' for i in ids))
+ def test_luna_quota_wait_does_not_block_queued_sol_job(self):
+  from codex_subscription import SubscriptionWait
+  other=self.store.import_rows([{'title_zh':'另一订阅通道商品','facts':'蓝色；2件'}])['created'][0]
+  other_asset=self.media.ingest(self.source,'另一通道参考原图','测试自制素材',other)
+  luna=self.job(request_id='luna-wait',model='gpt-6-luna')
+  sol=self.v.submit(self.request(request_id='sol-continue',product_id=other,revision=self.store.get(other)['revision'],asset_ids=[other_asset['id']],model='gpt-6-sol'))['job_ids'][0]
+  original=self.codex.preflight
+  def model_quota(rpc,model,**kwargs):
+   if model=='gpt-6-luna':
+    raise SubscriptionWait('Luna订阅等待额度',(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat())
+   return original(rpc,model,**kwargs)
+  with patch.object(self.codex,'preflight',side_effect=model_quota):self.v.drain()
+  self.assertEqual(self.v.get(luna)['status'],'waiting')
+  self.assertIsNone(self.v.get(luna)['dispatched_at'])
+  self.assertEqual(self.v.get(sol)['status'],'candidate')
+  self.assertIsNotNone(self.v.get(sol)['dispatched_at'])
+  self.assertFalse(self.v.state()['paused'])
+ def test_daily_total_limit_wait_blocks_both_luna_and_sol(self):
+  other=self.store.import_rows([{'title_zh':'每日总额度另一商品','facts':'蓝色；2件'}])['created'][0]
+  other_asset=self.media.ingest(self.source,'每日上限参考原图','测试自制素材',other)
+  luna=self.job(request_id='daily-luna',model='gpt-6-luna')
+  sol=self.v.submit(self.request(request_id='daily-sol',product_id=other,revision=self.store.get(other)['revision'],asset_ids=[other_asset['id']],model='gpt-6-sol'))['job_ids'][0]
+  with patch.object(self.v,'daily_limit',return_value=0),patch.object(self.codex,'session') as session:self.v.drain();session.assert_not_called()
+  self.assertEqual(self.v.get(luna)['status'],'waiting')
+  self.assertEqual(self.v.get(sol)['status'],'queued')
+  with patch.object(self.v,'run') as run:self.v.drain();run.assert_not_called()
+  self.assertIsNone(self.v.get(luna)['dispatched_at'])
+  self.assertIsNone(self.v.get(sol)['dispatched_at'])
  def test_background_wake_runs_due_task_without_manual_resume(self):
   jid=self.job()
   with patch.dict(os.environ,{'NOON_VISUAL_MODE':'limit'}):self.v.drain()

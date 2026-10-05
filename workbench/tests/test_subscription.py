@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -78,9 +79,13 @@ class SubscriptionTests(unittest.TestCase):
   self.assertIsNotNone(e.exception.retry_at);self.assertEqual(self.m.state()['calls'],[])
   self.assertEqual(self.m.call(self.pid,{},'quota')['billing'],'subscription')
  def test_unknown_quota_and_api_auth_do_not_dispatch(self):
-  for mode in ('quota_unknown','apikey'):
-   with patch.dict(os.environ,{'NOON_FAKE_MODE':mode}):
-    with self.assertRaises(Problem):self.m.call(self.pid,{},mode)
+  started=time.time()
+  with patch.dict(os.environ,{'NOON_FAKE_MODE':'quota_unknown'}):
+   with self.assertRaises(ModelLimit) as wait:self.m.call(self.pid,{},'quota-unknown')
+  remaining=datetime.fromisoformat(wait.exception.retry_at).timestamp()-started
+  self.assertGreaterEqual(remaining,58);self.assertLessEqual(remaining,61)
+  with patch.dict(os.environ,{'NOON_FAKE_MODE':'apikey'}):
+   with self.assertRaises(Problem):self.m.call(self.pid,{},'apikey')
   self.assertEqual(self.m.state()['calls'],[])
  def test_interrupted_malformed_changed_model_no_silent_replay(self):
   for mode in ('failed','malformed','model_changed','tool','approval'):

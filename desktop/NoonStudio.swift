@@ -117,7 +117,7 @@ final class Studio: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUID
         guard let output=smokePath,baseURL != nil,!smokeDone else{return}
         smokeDone=true
         DispatchQueue.main.asyncAfter(deadline:.now()+2) {
-            webView.evaluateJavaScript("JSON.stringify({title:document.title,heading:document.querySelector('h1')?.textContent,nav:[...document.querySelectorAll('[data-nav]')].map(x=>x.textContent),overflow:document.documentElement.scrollWidth>innerWidth,backend:typeof state!=='undefined'&&!!state.ops,products:typeof state!=='undefined'?state.products.length:null})") {value,error in
+            webView.evaluateJavaScript("JSON.stringify({title:document.title,heading:document.querySelector('h1')?.textContent,nav:[...document.querySelectorAll('[data-nav]')].map(x=>x.textContent),overflow:document.documentElement.scrollWidth>innerWidth,backend:typeof state!=='undefined'&&!!state&&typeof state.token==='string'&&Array.isArray(state.products),products:typeof state!=='undefined'&&state.products?state.products.length:null})") {value,error in
                 let result:[String:Any]=["ui":value ?? "", "error":error?.localizedDescription ?? "", "url":self.baseURL!.absoluteString, "pid":self.child?.processIdentifier ?? 0]
                 if let data=try? JSONSerialization.data(withJSONObject:result,options:.prettyPrinted){try? data.write(to:URL(fileURLWithPath:output+".json"))}
                 webView.takeSnapshot(with:nil){image,error in if let image=image, let tiff=image.tiffRepresentation,let bitmap=NSBitmapImageRep(data:tiff),let png=bitmap.representation(using:.png,properties:[:]){try? png.write(to:URL(fileURLWithPath:output+".png"))} }

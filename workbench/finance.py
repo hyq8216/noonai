@@ -54,7 +54,9 @@ class Finance:
             ''')
     def transact(self,action,b):
         if not isinstance(b,dict):raise Problem('财务操作格式无效')
-        key=text(b.get('request_id'),'操作编号',100);h=fingerprint([action,b])
+        key=text(b.get('request_id'),'操作编号',100)
+        try:h=fingerprint([action,b])
+        except UnicodeEncodeError:raise Problem('财务操作含有无效Unicode字符，请检查后重试')
         with self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             prior=c.execute('SELECT * FROM finance_requests WHERE key=?',(key,)).fetchone()

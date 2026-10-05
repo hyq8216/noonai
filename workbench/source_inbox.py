@@ -26,6 +26,16 @@ CATALOG_SCAN_LIMIT=100
 PHOTO_SCAN_LIMIT=2000
 VIDEO_SCAN_LIMIT=500
 
+
+def unchanged_regular_file(path,snapshot):
+    """Confirm an input still refers to the exact regular-file snapshot read."""
+    try:
+        if path.is_symlink():return False
+        current=path.stat()
+    except OSError:return False
+    return (current.st_dev,current.st_ino,current.st_mode,current.st_size,current.st_mtime_ns,current.st_ctime_ns)==(
+        snapshot.st_dev,snapshot.st_ino,snapshot.st_mode,snapshot.st_size,snapshot.st_mtime_ns,snapshot.st_ctime_ns)
+
 def rotating_paths(paths,cursor,limit):
     if not paths:return [],None
     start=bisect_right(paths,cursor) if cursor is not None else 0
@@ -37,6 +47,7 @@ SCHEMA_SQL='''
             CREATE TABLE IF NOT EXISTS source_inbox_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,translate INTEGER NOT NULL,review INTEGER NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_inbox_files(name TEXT NOT NULL,digest TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,result TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(name,digest));
             CREATE INDEX IF NOT EXISTS idx_source_inbox_files_status_updated ON source_inbox_files(status,updated_at DESC);
+            CREATE TABLE IF NOT EXISTS source_inbox_cursor(kind TEXT PRIMARY KEY,cursor TEXT,updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_inbox_visual_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,recipe TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_inbox_video_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,recipe TEXT NOT NULL,updated_at TEXT NOT NULL);
             INSERT OR IGNORE INTO source_inbox_config VALUES(1,0,0,0,'');
@@ -69,7 +80,6 @@ class SourceInbox:
         self.seen={}
         self.finished={}
         self.visual_seen={}
-        self.video_seen={}
         self.video_ready={}
         self.photo_cursor=None
         self.video_cursor=None
@@ -79,6 +89,13 @@ class SourceInbox:
         self.last_error=None
         with app.store.connect() as c:
             c.executescript(SCHEMA_SQL)
+            self._persisted_scan_cursors={row['kind']:row['cursor'] for row in c.execute(
+                "SELECT kind,cursor FROM source_inbox_cursor WHERE kind IN ('new','updates','photos','videos')")}
+            self.catalog_cursors.update({kind:self._persisted_scan_cursors[kind]
+                                         for kind in ('new','updates') if kind in self._persisted_scan_cursors})
+            media_cursors=self._persisted_scan_cursors
+            self.photo_cursor=self.photos/media_cursors['photos'] if media_cursors.get('photos') else None
+            self.video_cursor=self.videos/media_cursors['videos'] if media_cursors.get('videos') else None
             c.execute('INSERT OR IGNORE INTO source_inbox_visual_config VALUES(1,0,?,?)',
                       (json.dumps(DEFAULT_VISUAL,ensure_ascii=False),now()))
             c.execute('INSERT OR IGNORE INTO source_inbox_video_config VALUES(1,0,?,?)',
@@ -163,7 +180,6 @@ class SourceInbox:
         with self.lock,self.app.store.connect() as c:
             c.execute('UPDATE source_inbox_video_config SET enabled=?,recipe=?,updated_at=? WHERE id=1',
                       (int(body['enabled']),json.dumps(recipe,ensure_ascii=False),now()))
-            self.video_seen.clear()
         return self.state()
 
     def configure_visual(self,body):
@@ -252,34 +268,46 @@ class SourceInbox:
         if not old or (old['status'],old['message'],old['result'])!=(status,message,encoded):
             self.record(name,digest,status,message,result)
 
+    def read_children(self,folder,label):
+        try:return list(folder.iterdir())
+        except OSError as exc:
+            self.last_error=f'{label}目录无法读取：{exc}'
+            return []
+
     def tick(self):
         with self.lock:
             with self.app.store.connect() as c:config=self.config(c)
             if not config['enabled']:return
             if self.folder.is_symlink() or self.updates.is_symlink() or self.photos.is_symlink() or self.videos.is_symlink():raise Problem('投递箱目录不能是快捷链接')
             for kind,folder in (('new',self.folder),('updates',self.updates)):
-                names=sorted((p for p in folder.iterdir() if p.suffix.lower() in ('.csv','.json') and not p.is_symlink() and p.is_file()),key=lambda p:p.name)
-                selected,self.catalog_cursors[kind]=rotating_paths(names,self.catalog_cursors[kind],CATALOG_SCAN_LIMIT)
+                names=sorted((p for p in self.read_children(folder,kind) if p.suffix.lower() in ('.csv','.json') and not p.is_symlink() and p.is_file()),key=lambda p:p.name)
+                saved_cursor=self.catalog_cursors[kind]
+                cursor_path=folder/saved_cursor if saved_cursor else None
+                selected,next_cursor=rotating_paths(names,cursor_path,CATALOG_SCAN_LIMIT)
                 self.scan_progress[kind]={'checked':len(selected),'total':len(names)}
                 for path in selected:
                     try:self.check_file(path,config,kind)
                     except (OSError,UnicodeError,ValueError,Problem) as exc:
                         self.last_error=f'{kind}/{path.name}：{exc}'
+                # Commit progress only after every selected file has been
+                # checked. A process crash mid-batch safely rechecks it on
+                # restart; file receipts and import keys make that replay safe.
+                self.catalog_cursors[kind]=next_cursor.name if next_cursor else None
+                self._persist_scan_cursor(kind,self.catalog_cursors[kind])
             with self.app.store.connect() as c:
                 catalog_event=c.execute("SELECT coalesce(max(id),0) FROM events WHERE action IN ('导入','规格标识更新')").fetchone()[0]
-                auto_video_enabled=self.video_config(c)['enabled']
             photo_paths=[]
-            for folder in sorted(p for p in self.photos.iterdir() if p.is_dir() and not p.is_symlink()):
+            for folder in sorted(p for p in self.read_children(self.photos,'原图') if p.is_dir() and not p.is_symlink()):
                 if not re.fullmatch(r'[A-Za-z0-9._-]{1,100}',folder.name):
                     self.last_error='原图 SKU 文件夹只能使用英文字母、数字、点、下划线和连字符'
                     continue
-                for path in sorted(folder.iterdir()):
+                for path in sorted(self.read_children(folder,'原图 '+folder.name)):
                     if path.suffix.lower() not in ('.jpg','.jpeg','.png','.webp') or path.is_symlink() or not path.is_file():continue
                     if not re.fullmatch(r'[A-Za-z0-9._-]{1,250}',path.name):
                         self.last_error=f'photos/{folder.name}：图片文件名含不支持的字符'
                         continue
                     photo_paths.append(path)
-            selected,self.photo_cursor=rotating_paths(photo_paths,self.photo_cursor,PHOTO_SCAN_LIMIT)
+            selected,next_photo_cursor=rotating_paths(photo_paths,self.photo_cursor,PHOTO_SCAN_LIMIT)
             self.scan_progress['photos']={'checked':len(selected),'total':len(photo_paths)}
             touched_folders=set()
             for path in selected:
@@ -291,42 +319,80 @@ class SourceInbox:
                 try:self.schedule_visual(folder)
                 except (OSError,UnicodeError,ValueError,Problem) as exc:
                     self.last_error=f'photos/{folder.name}/自动生图：{exc}'
+            self.photo_cursor=next_photo_cursor
+            self._save_scan_cursor('photos',self.photos,next_photo_cursor)
             video_paths=[]
-            for folder in sorted(p for p in self.videos.iterdir() if p.is_dir() and not p.is_symlink()):
+            for folder in sorted(p for p in self.read_children(self.videos,'原视频') if p.is_dir() and not p.is_symlink()):
                 if not re.fullmatch(r'[A-Za-z0-9._-]{1,100}',folder.name):
                     self.last_error='原视频 SKU 文件夹只能使用英文字母、数字、点、下划线和连字符'
                     continue
-                for path in sorted(folder.iterdir()):
+                for path in sorted(self.read_children(folder,'原视频 '+folder.name)):
                     if path.suffix.lower() not in VIDEO_EXTENSIONS or path.is_symlink() or not path.is_file():continue
                     if not re.fullmatch(r'[A-Za-z0-9._-]{1,250}',path.name):
                         self.last_error=f'videos/{folder.name}：视频文件名含不支持的字符'
                         continue
                     video_paths.append(path)
-            selected,self.video_cursor=rotating_paths(video_paths,self.video_cursor,VIDEO_SCAN_LIMIT)
+            selected,next_video_cursor=rotating_paths(video_paths,self.video_cursor,VIDEO_SCAN_LIMIT)
             self.scan_progress['videos']={'checked':len(selected),'total':len(video_paths)}
             for path in selected:
                 folder=path.parent
                 try:
                     imported=self.check_video(path,catalog_event)
                     if not imported:imported=self.video_ready.get('videos/'+folder.name+'/'+path.name)
-                    observed=self.video_seen.get('videos/'+folder.name+'/'+path.name+'/自动优化')
-                    if imported and auto_video_enabled and (not observed or observed[1] is None or time.monotonic()-observed[1]>=30):
+                    if imported:
                         self.schedule_video(path,imported)
                 except (OSError,UnicodeError,ValueError,Problem) as exc:
                     self.last_error=f'videos/{folder.name}/{path.name}：{exc}'
+            self.video_cursor=next_video_cursor
+            self._save_scan_cursor('videos',self.videos,next_video_cursor)
+
+    def _save_scan_cursor(self,kind,root,cursor):
+        value=cursor.relative_to(root).as_posix() if cursor else None
+        self._persist_scan_cursor(kind,value)
+
+    def _persist_scan_cursor(self,kind,value):
+        if kind in self._persisted_scan_cursors and self._persisted_scan_cursors[kind]==value:return
+        if kind not in self._persisted_scan_cursors and value is None:return
+        with self.app.store.connect() as c:
+            c.execute('INSERT INTO source_inbox_cursor(kind,cursor,updated_at) VALUES(?,?,?) '
+                      'ON CONFLICT(kind) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at',
+                      (kind,value,now()))
+        self._persisted_scan_cursors[kind]=value
 
     def schedule_video(self,path,imported):
         with self.app.store.connect() as c:config=self.video_config(c)
-        if not config['enabled']:return
         asset=self.app.media.get(imported['asset_id'])
         if asset['kind']!='video' or asset['product_id']!=imported['product_id']:
             raise Problem('原视频归属已变化，请核对素材库',409)
+        name='videos/'+path.parent.name+'/'+path.name+'/自动优化'
+        # Reconcile durable work before considering a changed recipe or the
+        # current enabled flag. Never run two optimization recipes for the
+        # same source video at once.
+        with self.app.store.connect() as c:
+            pending=c.execute("SELECT digest,result FROM source_inbox_files WHERE name=? AND status='processing'",(name,)).fetchall()
+        pending_active=False
+        for row in pending:
+            prior=json.loads(row['result'] or '{}')
+            task_ids=prior.get('task_ids')
+            if prior.get('asset_id')!=asset['id'] or not isinstance(task_ids,list) or not task_ids:continue
+            placeholders=','.join('?' for _ in task_ids)
+            with self.app.store.connect() as c:
+                tasks=c.execute(f'SELECT id,status FROM media_tasks WHERE id IN ({placeholders})',task_ids).fetchall()
+            failed=any(task['status'] in ('failed','interrupted','cancelled') for task in tasks)
+            if failed:status,message='attention','原视频优化任务需要处理；请到图片与视频查看原任务并重试'
+            elif len(tasks)!=len(task_ids):status,message='attention','原视频优化任务不完整；请到图片与视频核对'
+            elif all(task['status']=='done' for task in tasks):
+                status,message='done','已排队的统一画幅视频与封面已生成；请播放核对'
+            else:
+                status,message='processing','原视频优化任务正在排队或处理中；请到图片与视频查看进度'
+                pending_active=True
+            self.record_if_changed(name,row['digest'],status,message,prior)
+        if pending_active or not config['enabled']:return
         recipe=config['recipe']
         marker=hashlib.sha256(json.dumps([asset['id'],asset['sha256'],recipe],sort_keys=True).encode()).hexdigest()
-        name='videos/'+path.parent.name+'/'+path.name+'/自动优化'
-        observed=self.video_seen.get(name)
-        if observed and observed[0]==marker and observed[1] is not None and time.monotonic()-observed[1]<30:return
-        self.video_seen[name]=(marker,time.monotonic())
+        # Always reconcile the durable task receipt. The request keys below
+        # make repeated scans safe, while a time-based early return can leave
+        # a completed optimization displayed as processing for up to 30s.
         request_id='inbox-video-'+marker[:48]
         with self.app.store.connect() as c:
             old=c.execute('SELECT id,status FROM media_tasks WHERE request_key IN (?,?) ORDER BY request_key',
@@ -345,7 +411,6 @@ class SourceInbox:
                 status,message='processing','原视频优化任务正在排队或处理中；请到图片与视频查看进度'
             self.record_if_changed(name,marker,status,message,
                                    {'product_id':asset['product_id'],'asset_id':asset['id'],'task_ids':[r['id'] for r in old]})
-            self.video_seen[name]=(marker,time.monotonic())
             return
         duration=min(float(recipe['max_seconds']),asset['duration'])
         if duration<.05:
@@ -361,7 +426,6 @@ class SourceInbox:
             return
         self.record_if_changed(name,marker,'processing','已排队制作统一画幅视频'+('和封面' if recipe['cover'] else '')+'；成品需人工播放核对',
                     {'product_id':asset['product_id'],'asset_id':asset['id'],'task_ids':result['task_ids']})
-        self.video_seen[name]=(marker,time.monotonic())
 
     def visual_reference_photos(self,folder,photos):
         manifest=folder/'references.txt'
@@ -369,8 +433,15 @@ class SourceInbox:
             if len(photos)>6:raise Problem('原图超过6张；请在 references.txt 逐行写入1至6个准确图片文件名')
             return photos,None
         if manifest.is_symlink() or not manifest.is_file():raise Problem('references.txt 必须是普通文本文件，不能是快捷链接')
-        if not 0<manifest.stat().st_size<=2048:raise Problem('references.txt 需在2KB以内，逐行列出1至6张原图')
-        try:names=[line.strip() for line in manifest.read_text(encoding='utf-8-sig').splitlines() if line.strip()]
+        before=manifest.stat()
+        if not 0<before.st_size<=2048:raise Problem('references.txt 需在2KB以内，逐行列出1至6张原图')
+        try:raw=manifest.read_bytes()
+        except OSError:raise
+        after=manifest.stat()
+        signature=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        if manifest.is_symlink() or signature(before)!=signature(after):
+            raise Problem('references.txt 读取期间发生变化，请重试')
+        try:names=[line.strip() for line in raw.decode('utf-8-sig').splitlines() if line.strip()]
         except UnicodeError:raise Problem('references.txt 请保存为 UTF-8 文本')
         if not 1<=len(names)<=6 or len(set(names))!=len(names):raise Problem('references.txt 需列出1至6个不同的图片文件名')
         by_name={p.name:p for p in photos}
@@ -471,10 +542,14 @@ class SourceInbox:
             self.finished[name]=marker
             return
         rights_bytes=rights_file.read_bytes() if rights_stat and rights_stat.st_size<=3000 else b''
-        rights=rights_bytes.decode('utf-8-sig').strip()
         photo_bytes=path.read_bytes()
-        if path.stat().st_mtime_ns!=photo_stat.st_mtime_ns or (rights_stat and rights_file.stat().st_mtime_ns!=rights_stat.st_mtime_ns):return
+        if not unchanged_regular_file(path,photo_stat) or (rights_stat and not unchanged_regular_file(rights_file,rights_stat)):return
         digest=hashlib.sha256(photo_bytes+b'\0'+rights_bytes).hexdigest()
+        try:rights=rights_bytes.decode('utf-8-sig').strip()
+        except UnicodeDecodeError:
+            self.record(name,digest,'attention','原图使用依据请保存为 UTF-8 文本')
+            self.finished[name]=marker
+            return
         with self.app.store.connect() as c:
             old=c.execute('SELECT status,result FROM source_inbox_files WHERE name=? AND digest=?',(name,digest)).fetchone()
         if old and old['status']=='done':
@@ -521,7 +596,6 @@ class SourceInbox:
         if self.seen.get(name)!=marker:
             self.seen[name]=marker
             self.video_ready.pop(name,None)
-            self.video_seen.pop(name+'/自动优化',None)
             return
         if self.finished.get(name)==marker:return
         if time.time_ns()-video_stat.st_mtime_ns<3_000_000_000:return
@@ -553,7 +627,7 @@ class SourceInbox:
             for block in iter(lambda:f.read(1024*1024),b''):h.update(block)
         video_sha=h.hexdigest()
         h.update(b'\0');h.update(rights_bytes)
-        if path.stat().st_mtime_ns!=video_stat.st_mtime_ns or path.stat().st_size!=video_stat.st_size or rights_file.stat().st_mtime_ns!=rights_stat.st_mtime_ns:return
+        if not unchanged_regular_file(path,video_stat) or not unchanged_regular_file(rights_file,rights_stat):return
         digest=h.hexdigest()
         with self.app.store.connect() as c:
             old=c.execute('SELECT status,result FROM source_inbox_files WHERE name=? AND digest=?',(name,digest)).fetchone()
@@ -622,7 +696,7 @@ class SourceInbox:
         processing={'translate':bool(config['translate']),'review':bool(config['review'])} if (config['translate'] or config['review']) and not auto_visual else None
         importer=SourceImport(self.app.store,self.app.automation)
         total=(len(rows)+499)//500
-        batches=[];source_groups={}
+        batches=[];source_groups={};unlinked_groups={}
         for index in range(total):
             group=rows[index*500:(index+1)*500]
             data=self.source_chunk(columns,group)
@@ -631,21 +705,35 @@ class SourceInbox:
             batches.append((group,preview))
             for item in preview['rows']:
                 values=item.get('values') or {}
-                if not values.get('source_url'):continue
-                key=values['source_url']+'|'+values.get('source_sku','')
                 fingerprint=hashlib.sha256(json.dumps(values,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-                source_groups.setdefault(key,[]).append((index*500+item['row'],fingerprint))
-        duplicate_rows=set();conflicting_rows=set()
+                number=index*500+item['row']
+                if values.get('source_url') and item.get('status')!='blocked':
+                    # Keep preflight blockers (for example, an ambiguous existing
+                    # catalog identity) intact instead of relabeling later rows as duplicates.
+                    key=(values['source_url'],values.get('source_sku',''))
+                    source_groups.setdefault(key,[]).append((number,fingerprint))
+                elif item.get('status')=='ready':
+                    # Without a source identity, only merge fully equivalent rows
+                    # that already pass validation; invalid rows retain their errors.
+                    unlinked_groups.setdefault(fingerprint,[]).append(number)
+        duplicate_rows=set();duplicate_reasons={};conflicting_rows=set()
         for group in source_groups.values():
             if len(group)<2:continue
             if len({fingerprint for _,fingerprint in group})>1:
                 conflicting_rows.update(number for number,_ in group)
             else:
-                duplicate_rows.update(number for number,_ in group[1:])
+                for number,_ in group[1:]:
+                    duplicate_rows.add(number)
+                    duplicate_reasons[number]='同一货源与规格在文件中重复，仅保留第一条'
+        for group in unlinked_groups.values():
+            for number in group[1:]:
+                duplicate_rows.add(number)
+                duplicate_reasons[number]='本文件中完全相同且缺少货源链接的商品资料，仅保留第一条'
         cataloged=newly_created=skipped=queued=waiting=0
         created_rows=[]
         run_ids=[]
         issue_examples=[]
+        issue_rows=[]
         seen_fingerprints=set()
         for index,(group,_) in enumerate(batches):
             kept=[];original_rows=[]
@@ -653,10 +741,12 @@ class SourceInbox:
                 number=index*500+position
                 if number in conflicting_rows or number in duplicate_rows:
                     skipped+=1
+                    issue={'row':number,'status':'blocked' if number in conflicting_rows else 'duplicate',
+                           'reason':'同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
+                                   duplicate_reasons.get(number,'同一货源与规格在文件中重复，仅保留第一条')}
+                    issue_rows.append(issue)
                     if len(issue_examples)<5:
-                        issue_examples.append({'row':number,'reason':
-                            '同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
-                            '同一货源与规格在文件中重复，仅保留第一条'})
+                        issue_examples.append(issue)
                 else:
                     kept.append(raw);original_rows.append(number)
             if not kept:
@@ -668,6 +758,11 @@ class SourceInbox:
             _,_,_,fingerprint=importer.prepare(data)
             if fingerprint in seen_fingerprints:
                 skipped+=len(kept)
+                for number in original_rows:
+                    issue={'row':number,'status':'duplicate',
+                           'reason':'与本文件前面的500行商品资料批次完全相同，已按幂等规则跳过'}
+                    issue_rows.append(issue)
+                    if len(issue_examples)<5:issue_examples.append(issue)
                 self.record(name,file_digest,'processing',f'已处理 {index+1}/{total} 批，已归集 {cataloged} 件',
                             {'batches_done':index+1,'batches_total':total,'cataloged':cataloged,'skipped':skipped,'run_ids':run_ids})
                 continue
@@ -690,11 +785,12 @@ class SourceInbox:
                     created_rows.append({**item,'row':original_rows[position]})
             skipped+=len(kept)-len(result['created'])
             for issue in result.get('skipped',[]):
-                if len(issue_examples)>=5:break
                 position=int(issue.get('row',0))-1
                 if not 0<=position<len(original_rows):continue
-                issue_examples.append({'row':original_rows[position],
-                                       'reason':str(issue.get('reason','未导入'))[:200]})
+                entry={'row':original_rows[position],'status':issue.get('status','blocked'),
+                       'reason':str(issue.get('reason','未导入'))[:200]}
+                issue_rows.append(entry)
+                if len(issue_examples)<5:issue_examples.append(entry)
             queued+=result.get('processing',{}).get('queued',0)
             waiting+=len(result.get('processing',{}).get('waiting',[]))
             run_id=result.get('processing',{}).get('run_id')
@@ -703,10 +799,13 @@ class SourceInbox:
                         {'batches_done':index+1,'batches_total':total,'cataloged':cataloged,'skipped':skipped,'run_ids':run_ids})
         message=f'自动分成 {total} 批；已归集 {cataloged} 件，跳过 {skipped} 行；'+(
             '等待原图到齐后启动图文流程' if auto_visual else f'自动加工排队 {queued} 件，待补资料或配置 {waiting} 件')
+        issue_rows.sort(key=lambda item:item['row'])
+        issue_examples.sort(key=lambda item:item['row'])
         self.record(name,file_digest,'done' if cataloged else 'attention',message if cataloged else message+'；没有可归集的商品，请核对表头和前几项原因',
                     {'batches_done':total,'batches_total':total,'cataloged':cataloged,'newly_created_this_scan':newly_created,'skipped':skipped,
                      'queued':queued,'waiting':waiting,'run_ids':run_ids,'issue_examples':issue_examples,
-                     'created_rows':created_rows,'mapping_complete':len(created_rows)==cataloged})
+                     'created_rows':created_rows,'mapping_complete':len(created_rows)==cataloged,
+                     'issue_rows':issue_rows})
         return True
 
     def process_large_updates(self,name,file_digest,suffix,content):
@@ -727,14 +826,17 @@ class SourceInbox:
         conflicting={pid for pid,count in product_counts.items() if count>1}
         updated=unchanged=skipped=0
         issue_examples=[]
+        issue_rows=[]
         for index,(group,initial) in enumerate(batches):
             kept=[];original_rows=[]
             for position,(raw,item) in enumerate(zip(group,initial['rows']),1):
                 if item.get('product_id') in conflicting:
                     skipped+=1
+                    issue={'row':index*500+position,'status':'blocked',
+                           'reason':'同一商品在文件中出现多次；请合并更新资料后重新投递'}
+                    issue_rows.append(issue)
                     if len(issue_examples)<5:
-                        issue_examples.append({'row':index*500+position,
-                                               'reason':'同一商品在文件中出现多次；请合并更新资料后重新投递'})
+                        issue_examples.append(issue)
                 else:
                     kept.append(raw);original_rows.append(index*500+position)
             if kept:
@@ -747,18 +849,22 @@ class SourceInbox:
                 unchanged+=preview['unchanged']
                 skipped+=len(kept)-len(result['updated'])-preview['unchanged']
                 for item in preview['rows']:
-                    if len(issue_examples)>=5:break
                     if item['status'] in ('blocked','duplicate'):
-                        issue_examples.append({'row':original_rows[item['row']-1],
-                                               'reason':item['reason'][:200]})
+                        entry={'row':original_rows[item['row']-1],'status':item['status'],
+                               'reason':item['reason'][:200]}
+                        issue_rows.append(entry)
+                        if len(issue_examples)<5:issue_examples.append(entry)
             self.record(name,file_digest,'processing',f'已处理 {index+1}/{total} 批，本轮更新 {updated} 件',
                         {'batches_done':index+1,'batches_total':total,'updated':updated,
                          'unchanged':unchanged,'skipped':skipped})
         status='done' if updated or unchanged else 'attention'
         message=f'自动分成 {total} 批；本轮更新 {updated} 件，未变化 {unchanged} 件，跳过 {skipped} 行；需重新核对供货与审核，未同步 noon'
+        issue_rows.sort(key=lambda item:item['row'])
+        issue_examples.sort(key=lambda item:item['row'])
         self.record(name,file_digest,status,message,
                     {'batches_done':total,'batches_total':total,'updated':updated,
-                     'unchanged':unchanged,'skipped':skipped,'issue_examples':issue_examples})
+                     'unchanged':unchanged,'skipped':skipped,'issue_examples':issue_examples,
+                     'issue_rows':issue_rows})
         return True
 
     def check_file(self,path,config,kind='new'):

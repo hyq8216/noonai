@@ -80,9 +80,13 @@ def hero_background_white(path):
     corners=((0,0,edge_x,edge_y),(width-edge_x,0,width,edge_y),
              (0,height-edge_y,edge_x,height),(width-edge_x,height-edge_y,width,height))
     fractions=[]
+    pixels=image.load()
     for box in corners:
-        pixels=list(image.crop(box).getdata())
-        fractions.append(sum(min(pixel)>=242 and max(pixel)-min(pixel)<=12 for pixel in pixels)/len(pixels))
+        x0,y0,x1,y1=box
+        count=(x1-x0)*(y1-y0)
+        white=sum(min(pixel)>=242 and max(pixel)-min(pixel)<=12
+            for y in range(y0,y1) for x in range(x0,x1) for pixel in (pixels[x,y],))
+        fractions.append(white/count)
     return sum(fraction>=.9 for fraction in fractions)>=3
 
 def prompt_for(recipe):
@@ -314,6 +318,8 @@ class Visuals:
         ids=b.get('asset_ids');shots=b.get('shots')
         if not isinstance(ids,list) or not 1<=len(ids)<=6 or any(not isinstance(x,str) for x in ids) or len(set(ids))!=len(ids):raise Problem('请选择1至6张不同的商品原图')
         if not isinstance(shots,list) or not 1<=len(shots)<=4 or any(not isinstance(x,str) or x not in SHOTS for x in shots) or len(set(shots))!=len(shots):raise Problem('请选择1至4种拍摄方案')
+        requested_shots=shots
+        shots=[shot for shot in SHOTS if shot in shots]
         if b.get('confirmed') is not True:raise Problem('请确认参考图是此商品、此规格，且允许用于重新制作')
         assets=[self.media.get(a,c) for a in ids]
         for a in assets:
@@ -335,7 +341,7 @@ class Visuals:
            'brief':string(b.get('brief',''),3000,'补充要求')}
         per_shot=shot_briefs(b.get('shot_briefs'))
         if per_shot:r['shot_briefs']=per_shot
-        h=digest({'recipe':r,'shots':shots});out=[]
+        h=digest({'recipe':r,'shots':requested_shots});out=[]
         existing=c.execute('SELECT id,digest FROM visual_jobs WHERE request_key LIKE ? ORDER BY request_key',(key+':%',)).fetchall()
         if existing:
             if any(row['digest']!=h for row in existing):raise Problem('请求编号已用于不同内容',409)
@@ -391,7 +397,12 @@ class Visuals:
                             e=Problem('额度恢复时间无效，请检查连接后重试')
                         else:
                             self.update(jid,'waiting',str(e)+'；尚未发送，到时间后自动重新检查',trace=json.dumps({'retry_at':retry,'waiting_since':now()}))
-                            return
+                            # Keep the queue moving for another model whose
+                            # subscription is ready. READY_QUEUED_SQL blocks
+                            # this model until its retry time, and a daily-cap
+                            # wait blocks every model, so continuing cannot
+                            # bypass either cooldown.
+                            continue
                     status='output_rejected' if job['status']=='output_rejected' else 'uncertain' if job['dispatched_at'] else 'blocked' 
                     self.update(jid,status,str(e) if isinstance(e,Problem) else '制作未完成，原件已保留；请核对后处理')
                     if status=='output_rejected':
@@ -418,7 +429,12 @@ class Visuals:
             self.codex.preflight(rpc,r['model'],images=True);self.current(r)
             paths=[]
             for i,a in enumerate(r['references']):
-                path=Path(cwd)/(str(i)+Path(a['file']).suffix);shutil.copyfile(self.media.root/a['file'],path);paths.append(path)
+                path=Path(cwd)/(str(i)+Path(a['file']).suffix);shutil.copyfile(self.media.root/a['file'],path)
+                # The source was checked above, but may change while it is copied.
+                # Verify the exact bytes that will be sent before starting a model turn.
+                if hashlib.sha256(path.read_bytes()).hexdigest()!=a['sha256']:
+                    raise Problem('复制到生图任务的参考原图与已核验版本不一致，未发送任务',409)
+                paths.append(path)
             def mark(tid):
                 if self.stopping.is_set():raise Problem('应用正在关闭，未发送生图任务')
                 with self.store.connect() as c:
@@ -453,7 +469,11 @@ class Visuals:
                 else:
                     if matched:quality_error='生成输出与参考原图画面几乎相同，可能只是重编码或缩放；输出已保留，不能作为新制作图'
             diagnostics.update(output_width=info['width'],output_height=info['height'],output_check='rejected' if quality_error else 'passed')
-            self.current(r)
+            try:self.current(r)
+            except Problem:
+                stale_note='生成期间商品规格或参考原图发生变化；本次已收到的旧版本图片已保留，但不可验收或加入商品'
+                quality_error=(quality_error+'；'+stale_note) if quality_error else stale_note
+                diagnostics.update(output_check='rejected',output_check_reason='生成期间商品规格或参考原图发生变化')
             aid=ident();ext={'PNG':'png','JPEG':'jpg','WEBP':'webp'}[info['format']]
             dest=self.media.root/(aid+'.'+ext);preview=self.media.root/(aid+'-preview.jpg');shutil.copyfile(out,dest)
             try:

@@ -58,6 +58,13 @@ class VisualCheckTests(unittest.TestCase):
   with patch.object(self.app.models.codex,'session',side_effect=AssertionError('No reconnect')):
    out=self.app.models.call(self.pid,r['source'],'visual-check-'+jid,'visual-check',r['product_id'],image_paths=paths)
   self.assertEqual(out,r['report'])
+ def test_preview_rejects_unencodable_image_job_id_before_database_query(self):
+  with self.assertRaises(Problem):self.v.preview({'ids':['bad-\ud800'],'profile_id':self.pid})
+  self.assertEqual(self.app.store.history()['jobs'],[])
+ def test_submit_rejects_unencodable_request_before_ledger_or_job_write(self):
+  before=self.app.store.history()['jobs']
+  with self.assertRaises(Problem):self.v.submit({'ids':['synthetic'],'profile_id':self.pid,'request_id':'bad-\ud800','confirmed':True})
+  self.assertEqual(self.app.store.history()['jobs'],before)
  def test_stale_preview_and_stale_result(self):
   vid=self.candidate();b=self.body(vid);path=self.v.input(vid)['paths'][0];os.utime(path,ns=(1,1))
   with self.assertRaises(Problem):self.v.submit(b)

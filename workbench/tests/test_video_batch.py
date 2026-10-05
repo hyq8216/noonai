@@ -1,4 +1,5 @@
 import json,sys,tempfile,time,unittest,uuid
+from datetime import datetime,timezone,timedelta
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -9,6 +10,10 @@ from core import Problem
 class VideoBatchTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.s=self.app.store;self.media=self.app.media;self.batch=VideoBatch(self.app);self.media.control({'action':'pause'})
+  # Workflow tests advance the retry clock instead of sleeping for each durable wait.
+  self.scheduler_time=[datetime.now(timezone.utc)];auto=self.app.automation;auto.clock=lambda:self.scheduler_time[0];tick=auto.tick
+  def advance_tick():self.scheduler_time[0]+=timedelta(seconds=6);return tick()
+  auto.tick=advance_tick
  def tearDown(self):self.app.models.codex.close();self.app.visuals.close();self.app.visual_checks.close();self.media.close();self.app.executor.shutdown();self.tmp.cleanup()
  def product(self,title='Product',color='red',verified=True):
   pid=self.s.import_rows([{'title_zh':title,'facts':'test fixture','rights_evidence':'synthetic fixture'}])['created'][0];images=[]

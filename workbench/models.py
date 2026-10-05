@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from urllib.parse import urlsplit
 from core import Problem, ident, now
-from connectors import request_json
+from connectors import request_json, UncertainExternalCall
 from codex_subscription import CodexSubscription, SubscriptionWait, MODELS
 
 BASES={'openai':'https://api.openai.com/v1','minimax':'https://api.minimax.io/v1','minimax-cn':'https://api.minimax.cn/v1'}
@@ -123,8 +123,25 @@ class Models:
             for r in calls:
                 r['usage']=json.loads(r['usage']) if r['usage'] else None
                 r['billing']='subscription' if json.loads(r.pop('profile')).get('provider')=='codex-subscription' else 'api'
-            day=now()[:10];totals=[dict(r) for r in c.execute('SELECT profile_id,count(*) AS calls,sum(charged_micro) AS estimated_micro FROM model_calls WHERE created_at>=? GROUP BY profile_id',(day,))]
+            day=now()[:10];totals=[dict(r) for r in c.execute('''SELECT profile_id,count(*) AS calls,
+                coalesce(sum(charged_micro),0) AS estimated_micro,
+                sum(CASE WHEN status IN ('calling','uncertain') THEN 1 ELSE 0 END) AS unresolved_calls
+                FROM model_calls WHERE created_at>=? GROUP BY profile_id''',(day,))]
             terms=[dict(r) for r in c.execute('SELECT id,source,en,ar,revision,updated_at FROM model_terms ORDER BY source_key')]
+        totals_by_profile={r['profile_id']:r for r in totals}
+        for p in profiles:
+            used=totals_by_profile.get(p['id'],{})
+            call_count=int(used.get('calls',0));limit=int(p['daily_calls'])
+            call_percent=100.0 if limit==0 else min(100.0,round(call_count*100/limit,1))
+            is_subscription=p['provider']=='codex-subscription'
+            estimate=int(used.get('estimated_micro',0));budget=0 if is_subscription else int(Decimal(p['daily_usd'])*1000000)
+            spend_percent=0.0 if is_subscription or budget==0 else min(100.0,round(estimate*100/budget,1))
+            exhausted=call_count>=limit or (not is_subscription and budget>0 and estimate>=budget)
+            warning=not exhausted and (call_percent>=80 or (not is_subscription and spend_percent>=80))
+            p['daily_budget']={'calls':call_count,'calls_limit':limit,'calls_remaining':max(0,limit-call_count),
+                'calls_percent':call_percent,'estimated_micro':estimate,'budget_micro':budget,
+                'estimated_percent':spend_percent,'unresolved_calls':int(used.get('unresolved_calls',0)),
+                'state':'exhausted' if exhausted else 'warning' if warning else 'normal'}
         return {'profiles':profiles,'routes':routes,'calls':calls,'today':totals,'day_utc':day,'codex':self.codex.state(),'terms':terms}
 
     def save_term(self,b):
@@ -232,19 +249,29 @@ class Models:
         with self.store.connect() as c:
             row=c.execute('SELECT profile_id FROM model_routes WHERE role=?',(role,)).fetchone()
             return bool(row and row[0])
+    def route_snapshot(self,role,c=None):
+        if c is None:
+            with self.store.connect() as connection:return self.route_snapshot(role,connection)
+        row=c.execute('''SELECT r.profile_id,p.revision FROM model_routes r
+            JOIN model_profiles p ON p.id=r.profile_id WHERE r.role=?''',(role,)).fetchone()
+        if not row or not row['profile_id']:
+            raise Problem('请先配置'+{'primary':'批量处理','review':'内容复核','fallback':'备用'}[role]+'模型',409)
+        return {'profile_id':row['profile_id'],'revision':row['revision']}
     def resolve(self,role):
         with self.store.connect() as c:
             row=c.execute('SELECT profile_id FROM model_routes WHERE role=?',(role,)).fetchone()
             if not row or not row[0]:raise Problem('请先配置'+{'primary':'批量处理','review':'内容复核','fallback':'备用'}[role]+'模型',409)
             return self.get(row[0],c)
-    def call(self,pid,source,key,purpose='translate',product_id=None,image_paths=None):
+    def call(self,pid,source,key,purpose='translate',product_id=None,image_paths=None,expected_revision=None):
         p=self.get(pid)
+        if expected_revision is not None and p['revision']!=expected_revision:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         if purpose=='visual-check' and (p['provider']!='codex-subscription' or not image_paths):raise Problem('图片对照检查仅使用已配置的Codex订阅，并需要原图和输出图片',409)
-        if p['provider']!='codex-subscription':return self._call(pid,source,key,purpose,product_id)
+        if p['provider']!='codex-subscription':return self._call(pid,source,key,purpose,product_id,expected_revision=expected_revision)
         if not p['enabled']:raise Problem('模型未启用',409)
         # Replays are resolved from the ledger even while offline or logged out.
         with self.store.connect() as c:old=c.execute('SELECT 1 FROM model_calls WHERE request_key=?',(key,)).fetchone()
-        if old:return self._call(pid,source,key,purpose,product_id,image_paths=image_paths)
+        if old:return self._call(pid,source,key,purpose,product_id,image_paths=image_paths,expected_revision=expected_revision)
         try:
             with self.codex.session() as (rpc,cwd):
                 self.codex.preflight(rpc,p['model'])
@@ -317,16 +344,23 @@ class Models:
             message=str(e) if isinstance(e,Problem) else '模型响应无法处理，未修改商品'
             # Defensive redaction even if a future adapter embeds its key in an exception.
             message=message.replace(secret,'[密钥已隐藏]') if secret else message
-            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if subscription else 'failed',json.dumps(usage),charged,message,now(),cid))
+            uncertain=subscription or isinstance(e,UncertainExternalCall)
+            with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if uncertain else 'failed',json.dumps(usage),charged,message,now(),cid))
             raise Problem(message, e.status if isinstance(e,Problem) else 502)
-    def translate(self,p,request_key,role='primary'):
+    def translate(self,p,request_key,role='primary',route_snapshot=None):
         if not p.get('facts'):raise Problem('先填写规格事实，避免无依据生成',409)
-        profile=self.resolve(role)
+        snapshot=route_snapshot or self.route_snapshot(role)
+        profile=self.get(snapshot['profile_id'])
+        if profile['revision']!=snapshot['revision']:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         source={k:p.get(k) for k in ('title_zh','facts','brand','source_sku')}
         source['preferred_terms']=self.matched_terms(p)
-        return self.call(profile['id'],source,request_key,'translate',p['id'])
-    def review(self,p,request_key):
-        profile=self.resolve('review')
+        return self.call(profile['id'],source,request_key,'translate',p['id'],expected_revision=snapshot['revision'])
+    def review(self,p,request_key,route_snapshot=None):
+        snapshot=route_snapshot or self.route_snapshot('review')
+        profile=self.get(snapshot['profile_id'])
+        if profile['revision']!=snapshot['revision']:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         source={k:p.get(k) for k in ('title_zh','facts','brand','source_sku',*CONTENT_FIELDS)}
         source['preferred_terms']=self.matched_terms(p)
-        return self.call(profile['id'],source,request_key,'review',p['id'])
+        return self.call(profile['id'],source,request_key,'review',p['id'],expected_revision=snapshot['revision'])

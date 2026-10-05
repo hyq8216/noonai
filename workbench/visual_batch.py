@@ -12,6 +12,7 @@ class VisualBatch:
         ids=b.get('product_ids');shots=b.get('shots')
         if not isinstance(ids,list) or not 1<=len(ids)<=500 or any(not isinstance(i,str) for i in ids) or len(set(ids))!=len(ids):raise Problem('请选择 1 至 500 件不同商品')
         if not isinstance(shots,list) or not 1<=len(shots)<=4 or any(not isinstance(s,str) or s not in SHOTS for s in shots) or len(set(shots))!=len(shots):raise Problem('请选择 1 至 4 种拍摄方案')
+        shots=[shot for shot in SHOTS if shot in shots]
         if b.get('model') not in ('gpt-6-sol','gpt-6-luna') or b.get('aspect') not in ASPECTS:raise Problem('模型或画幅无效')
         reference_ids=b.get('reference_asset_ids')
         if reference_ids is not None and (len(ids)!=1 or not isinstance(reference_ids,list) or not 1<=len(reference_ids)<=6 or

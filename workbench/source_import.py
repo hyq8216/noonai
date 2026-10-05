@@ -1,6 +1,6 @@
 """Preview supplier catalog columns and import only explicitly confirmed valid rows."""
 import csv,hashlib,io,json
-from core import Problem,clean,TEXT_FIELDS,NUM_FIELDS
+from core import Problem,clean,TEXT_FIELDS,NUM_FIELDS,source_identity_keys
 LABELS={'title_zh':'商品名称','source_url':'货源链接','source_sku':'规格货号 / SKU','supplier':'供应商','facts':'规格事实','brand':'品牌','category':'类目编码','cost_cny':'采购成本（人民币元）','stock':'库存数量','title_en':'英文标题','description_en':'英文描述','title_ar':'阿文标题','description_ar':'阿文描述','rights_evidence':'素材使用依据','note':'备注','supply_checked_at':'供货核对时间','mode':'经营模式（NGS / LOCAL）','domestic_shipping_cny':'国内运费（人民币元）','packing_cny':'包装费（人民币元）','other_cny':'其他成本（人民币元）','transfer_usd':'转移价（美元）','fx':'美元兑人民币汇率','loss_rate':'损失比例（0至1）','collection_rate':'收款费率（0至1）','acquisition_cny':'获客成本（人民币元）','attribute_values':'类目属性（JSON）'}
 ALIASES={'title_zh':['商品名称','商品标题','产品名称','中文标题'],'source_url':['货源链接','商品链接','1688链接'],'source_sku':['规格货号','规格SKU','SKU','货号'],'supplier':['供应商','供应商名称'],'facts':['规格事实','规格说明','商品规格'],'brand':['品牌'],'category':['类目编码'],'cost_cny':['采购成本（人民币元）','采购成本(人民币元)','采购价（元）','采购价(元)'],'stock':['库存数量','库存'],'note':['备注'],'rights_evidence':['素材使用依据']}
 FIELDS=TEXT_FIELDS+NUM_FIELDS+['attribute_values']
@@ -13,7 +13,10 @@ def parse(b):
     if ('csv' in b)==('products' in b):raise Problem('请选择一种CSV或JSON商品资料')
     if 'csv' in b:
         text=b['csv']
-        if not isinstance(text,str) or len(text.encode())>4*1024*1024:raise Problem('CSV资料需在4MB以内')
+        if not isinstance(text,str):raise Problem('CSV资料需为文本且在4MB以内')
+        try:size=len(text.encode('utf-8'))
+        except UnicodeEncodeError:raise Problem('CSV含有无效Unicode字符，请另存为UTF-8 CSV')
+        if size>4*1024*1024:raise Problem('CSV资料需在4MB以内')
         reader=csv.reader(io.StringIO(text.lstrip('\ufeff')),strict=True)
         try:
             columns=next(reader);rows=[]
@@ -25,7 +28,9 @@ def parse(b):
     else:
         source=b['products']
         if not isinstance(source,list) or not 1<=len(source)<=500 or any(not isinstance(r,dict) for r in source):raise Problem('JSON需包含1至500个商品对象')
-        if len(json.dumps(source,ensure_ascii=False).encode())>4*1024*1024:raise Problem('JSON资料需在4MB以内')
+        try:size=len(json.dumps(source,ensure_ascii=False).encode('utf-8'))
+        except UnicodeEncodeError:raise Problem('JSON商品资料含有无效Unicode字符，请修正后重试')
+        if size>4*1024*1024:raise Problem('JSON资料需在4MB以内')
         columns=list(dict.fromkeys(k for row in source for k in row))
         rows=[(i+1,[row.get(k) for k in columns]) for i,row in enumerate(source)]
     if not columns or len(columns)>80 or any(not isinstance(c,str) or len(c)>200 for c in columns):raise Problem('表头需为1至80列，每列名称不超过200字')
@@ -103,13 +108,14 @@ class SourceImport:
                 prepared[number]=raw;row['title']=p['title_zh'];row['status']='ready';row['reason']='可导入为待补充商品'
                 row['values']={k:p[k] for k in mapping}
                 if fact_columns:row['values']['facts']=p['facts']
-                source_key=p['source_url']+'|'+p['source_sku'] if p['source_url'] else None
+                source_key=(p['source_url'],p['source_sku']) if p['source_url'] else None
                 if not source_key:row['warnings'].append('缺少货源链接，修改文件后无法可靠判断是否重复商品')
                 if p['source_url'] and not p['source_sku']:row['warnings'].append('未填写规格货号；同一链接下的不同规格请分配不同货号')
                 if source_key:
                     groups.setdefault(source_key,[]).append((number,digest(p)))
-                    old=c.execute('SELECT id,revision FROM products WHERE source_key=?',(source_key,)).fetchone()
-                    if old:existing[number]=dict(old);row.update(status='duplicate',reason='商品库已有同一货源与规格，保留现有资料',existing_id=old['id'])
+                    old=c.execute('SELECT id,revision FROM products WHERE source_key IN (?,?)',source_identity_keys(*source_key)).fetchall()
+                    if len(old)>1:row.update(status='blocked',reason='该货源与规格对应多份商品档案，请先人工核对')
+                    elif old:existing[number]=dict(old[0]);row.update(status='duplicate',reason='商品库已有同一货源与规格，保留现有资料',existing_id=old[0]['id'])
             except Problem as e:
                 message=str(e)
                 for k,label in LABELS.items():message=message.replace(k,label)
@@ -121,7 +127,9 @@ class SourceImport:
             if len({h for _,h in items})>1:
                 for number,_ in items:by_number[number].update(status='blocked',reason='本文件中同一货源与规格存在不同资料，请修正货号或合并冲突行')
             else:
-                for number,_ in items[1:]:by_number[number].update(status='duplicate',reason='与本文件前面的商品重复，仅保留第一条')
+                for number,_ in items[1:]:
+                    if by_number[number]['status']=='ready':
+                        by_number[number].update(status='duplicate',reason='与本文件前面的商品重复，仅保留第一条')
         if previous:
             for row in rows:
                 if row['status']=='ready':row.update(status='imported',reason='相同文件内容与列对应关系已导入，未重复建立商品')
