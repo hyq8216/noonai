@@ -9,10 +9,13 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from PIL import Image, ImageOps, ImageCms, ImageEnhance, ImageDraw, ImageFont, features
+import arabic_reshaper
+from bidi.algorithm import get_display
 from core import Problem, ident, now
 
 Image.MAX_IMAGE_PIXELS=24_000_000
@@ -94,7 +97,6 @@ def jpeg(im,path):
 def draw_text(draw,value,box,size,color='#19242c'):
     if not value:return
     is_ar=bool(re.search('[\u0600-\u06ff]',value))
-    if is_ar and not features.check('raqm'):raise Problem('当前图片引擎不支持阿文排版，请更换环境或使用英文模板')
     paths=['/System/Library/Fonts/Supplemental/Arial Unicode.ttf','/System/Library/Fonts/PingFang.ttc','/System/Library/Fonts/Helvetica.ttc']
     # Linux cloud runners do not have macOS fonts. Select a font that covers
     # the requested script rather than silently rendering Chinese as boxes.
@@ -106,17 +108,40 @@ def draw_text(draw,value,box,size,color='#19242c'):
     font_path=next((p for p in paths if Path(p).is_file()),None)
     if not font_path:raise Problem('模板字体不可用')
     font=ImageFont.truetype(font_path,size)
-    opts={'direction':'rtl'} if is_ar else {}
-    width=box[2]-box[0];lines=[];line=''
-    for ch in value:
-        if ch=='\n' or (line and draw.textlength(line+ch,font=font,**opts)>width):lines.append(line);line='' if ch=='\n' else ch
-        else:line+=ch
-    if line:lines.append(line)
+    use_raqm=is_ar and features.check('raqm')
+    opts={'direction':'rtl'} if use_raqm else {}
+    def display(line):
+        if is_ar and not use_raqm:return get_display(arabic_reshaper.reshape(line))
+        return line
+    width=box[2]-box[0];lines=[]
+    for paragraph in value.split('\n'):
+        line=''
+        for word in re.findall(r'\S+|\s+',paragraph):
+            if word.isspace():
+                if line:line+=word
+                continue
+            candidate=line+word
+            if draw.textlength(display(candidate),font=font,**opts)<=width:
+                line=candidate;continue
+            if line:lines.append(line.rstrip());line=''
+            clusters=[]
+            for char in word:
+                if clusters and (unicodedata.combining(char) or char=='\u200d' or clusters[-1].endswith('\u200d')):
+                    clusters[-1]+=char
+                else:clusters.append(char)
+            for cluster in clusters:
+                if line and draw.textlength(display(line+cluster),font=font,**opts)>width:
+                    lines.append(line.rstrip());line=''
+                if draw.textlength(display(cluster),font=font,**opts)>width:
+                    raise Problem('模板文字包含无法排入画布的字符，请缩短说明')
+                line+=cluster
+        if line.strip() or not paragraph:lines.append(line.rstrip())
     lineheight=int(size*1.45)
     if len(lines)*lineheight>box[3]-box[1]:raise Problem('模板文字太长，请缩短标题或说明，避免成图截字')
     for i,line in enumerate(lines):
-        x=box[2]-draw.textlength(line,font=font,**opts) if is_ar else box[0]
-        draw.text((x,box[1]+i*lineheight),line,font=font,fill=color,**opts)
+        rendered=display(line)
+        x=box[2]-draw.textlength(rendered,font=font,**opts) if is_ar else box[0]
+        draw.text((x,box[1]+i*lineheight),rendered,font=font,fill=color,**opts)
 
 
 class Media:

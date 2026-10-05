@@ -1,4 +1,5 @@
 import base64,io,json,sys,tempfile,unittest
+from datetime import datetime,timezone,timedelta
 from pathlib import Path
 from unittest.mock import patch,Mock
 from PIL import Image
@@ -10,6 +11,9 @@ from image_host import verify_public
 class ImageHostTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.h=self.app.image_host;self.s=self.app.store
+  self.scheduler_time=[datetime.now(timezone.utc)];auto=self.app.automation;auto.clock=lambda:self.scheduler_time[0];tick=auto.tick
+  def advance_tick():self.scheduler_time[0]+=timedelta(seconds=6);return tick()
+  auto.tick=advance_tick
   self.config={'endpoint':'https://s3.example.test','region':'test-1','bucket':'test-bucket','prefix':'noon-images','public_base':'https://cdn.example.test','addressing_style':'path','access_key':'TESTACCESS','secret_key':'TESTSECRET'}
   self.pid=self.s.import_rows([{'title_zh':'测试商品','facts':'red card'}])['created'][0]
   buf=io.BytesIO();Image.new('RGB',(1600,1600),'red').save(buf,format='PNG');im=normalize_image(self.s,base64.b64encode(buf.getvalue()).decode(),'square')
@@ -41,6 +45,22 @@ class ImageHostTests(unittest.TestCase):
   with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=[Problem('missing'),None]) as verify:out=self.h.publish(p)
   client.put_object.assert_called_once();self.assertEqual(verify.call_count,2);kw=client.put_object.call_args.kwargs;self.assertNotIn('ACL',kw);self.assertIn('ContentMD5',kw)
   saved=self.s.get(self.pid);self.assertTrue(saved['images'][0]['public_url'].startswith('https://cdn.example.test/noon-images/'));self.assertFalse(saved['images_verified']);self.assertFalse(saved['reviewed']);self.assertEqual(len(out['images']),1)
+ def test_product_urls_and_host_receipt_commit_together(self):
+  b,r,p=self.queued();jid=r['jobs'][0]['job_id']
+  with patch.object(self.h,'client',return_value=Mock()),patch('image_host.verify_public'):
+   self.app.run(jid,p,'image-host')
+  job=self.h.status('test')['jobs'][0];saved=self.s.get(self.pid)
+  self.assertEqual(job['status'],'done');self.assertTrue(saved['images'][0]['public_url'])
+  with self.s.connect() as c:receipt=json.loads(c.execute('SELECT result FROM jobs WHERE id=?',(jid,)).fetchone()[0])
+  self.assertEqual(receipt['revision'],saved['revision']);self.assertEqual(receipt['images'][0]['public_url'],saved['images'][0]['public_url'])
+ def test_host_completion_transaction_rolls_back_product_on_failure(self):
+  _,r,p=self.queued();jid=r['jobs'][0]['job_id'];original=self.s.update
+  def fail_after_update(*args,**kwargs):
+   original(*args,**kwargs);raise RuntimeError('injected process failure before host receipt commit')
+  with patch.object(self.h,'client',return_value=Mock()),patch('image_host.verify_public'),patch.object(self.s,'update',side_effect=fail_after_update):
+   self.app.run(jid,p,'image-host')
+  job=self.h.status('test')['jobs'][0];saved=self.s.get(self.pid)
+  self.assertEqual(job['status'],'failed');self.assertFalse(saved['images'][0]['public_url'])
  def test_existing_identical_object_skips_upload(self):
   _,_,p=self.queued();client=Mock()
   with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public'):self.h.publish(p)

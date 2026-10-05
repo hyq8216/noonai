@@ -65,7 +65,17 @@ class WorkflowTests(unittest.TestCase):
     def test_persistence_restart_jobs(self):
         p=self.make(); jid=self.store.add_job(p['id'],'translate',p['revision'])
         other=Store(self.tmp.name); other.recover_jobs()
-        self.assertEqual(other.get(p['id'])['source_sku'],'BLACK-5'); self.assertEqual(other.history()['jobs'][0]['status'],'interrupted')
+        self.assertEqual(other.get(p['id'])['source_sku'],'BLACK-5')
+        queued=other.history()['jobs'][0]
+        self.assertEqual((queued['id'],queued['status']),(jid,'failed'))
+        self.assertIn('尚未开始外部调用',queued['message'])
+        # Once a worker atomically claims a job, restart cannot know whether an
+        # external request left the process, so it must require reconciliation.
+        running=other.add_job(p['id'],'translate',p['revision'])
+        with other.connect() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(running,))
+        other.recover_jobs();result=other.history()['jobs'][0]
+        self.assertEqual((result['id'],result['status']),(running,'interrupted'))
+        self.assertIn('结果可能不确定',result['message'])
     def test_one_job_per_product(self):
         p=self.make(); self.store.add_job(p['id'],'translate',p['revision'])
         with self.assertRaises(Problem): self.store.add_job(p['id'],'translate',p['revision'])
@@ -131,7 +141,7 @@ class WorkflowTests(unittest.TestCase):
         app=App(self.tmp.name); p=self.complete(); p=self.store.approve(p['id'],p['revision'])
         jid=self.store.add_job(p['id'],'submit',p['revision'])
         contract={'attributes':[{'attribute_code':k,'is_mandatory':True,'is_localizable':True,'attribute_type':'ATTRIBUTE_TYPE_TEXT'} for k in ['product_title','long_description']]}
-        with patch('server.Noon') as client:
+        with patch.object(app,'config',return_value={'noon_ready':True,'submit_enabled':True}),patch('server.Noon') as client:
             client.return_value.attributes.return_value=contract
             client.return_value.submit.return_value={'sku_parent':'TEST-PARENT','status':{'status_id':3,'message':'invalid'}}
             app.run(jid,p,'submit')
@@ -164,6 +174,16 @@ class HttpTests(unittest.TestCase):
         r=json.loads(self.call('/api/import',{'products':[{'title_zh':'HTTP商品'}]},{'X-Workbench-Token':self.app.token}).read())
         self.assertEqual(len(r['created']),1)
         self.assertTrue(any(p['title_zh']=='HTTP商品' for p in json.loads(self.call('/api/state').read())['products']))
+    def test_health_and_readiness_probes_are_small_and_database_aware(self):
+        health=json.loads(self.call('/healthz').read())
+        self.assertEqual(health,{'status':'ok','service':'noon-studio'})
+        ready=json.loads(self.call('/readyz').read())
+        self.assertEqual(ready,{'status':'ready','checks':{'database':'ok'}})
+        self.assertNotIn(self.app.token,json.dumps(health)+json.dumps(ready))
+        with patch.object(self.app.store,'connect',side_effect=OSError('private database path')):
+            with self.assertRaises(HTTPError) as failed:self.call('/readyz')
+            self.assertEqual(failed.exception.code,503)
+            self.assertEqual(json.loads(failed.exception.read()),{'status':'not_ready','checks':{'database':'error'}})
     def test_traversal_and_unknown_host(self):
         with self.assertRaises(HTTPError): self.call('/assets/../../.env')
         with self.assertRaises(HTTPError) as cm: self.call('/api/state',headers={'Host':'evil.example'})

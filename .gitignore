@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.cloud-runtime/
 node_modules
 .env
 .env.*

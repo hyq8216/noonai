@@ -14,7 +14,12 @@ class WorkflowVideoTests(unittest.TestCase):
   for _ in range(3):self.a.tick()
  def item(self):return self.a.state()['items'][0]
  def test_real_video_returns_to_flow_and_no_repeat(self):
-  self.begin();self.a.tick();tid=self.item()['data']['video_task'];self.a.tick();self.assertEqual(self.item()['data']['video_task'],tid);self.media.control({'action':'resume'});self.assertEqual(self.wait(tid)['status'],'done');self.a.tick();self.assertEqual(len(self.item()['data']['video_outputs']),1);self.a.tick();self.assertEqual(self.item()['status'],'done')
+  self.begin();self.a.tick();tid=self.item()['data']['video_task'];self.a.tick();self.assertEqual(self.item()['data']['video_task'],tid);self.media.control({'action':'resume'});self.assertEqual(self.wait(tid)['status'],'done');self.a.tick()
+  self.assertEqual(len(self.item()['data']['video_outputs']),1);self.assertEqual(self.item()['status'],'approval')
+  from video_batch import VideoBatch
+  aid=self.item()['data']['video_outputs'][0];asset=self.media.get(aid)
+  VideoBatch(self.app).review({'asset_id':aid,'expected_sha256':asset['sha256'],'expected_review_at':'','decision':'approved','checks':{'identity':True,'motion':True,'quality':True}})
+  self.a.tick();self.a.tick();self.assertEqual(self.item()['status'],'done')
  def test_checkpoint_crash_replays_same_media_task(self):
   self.begin();original=self.a.checkpoint
   def crash(i,data):

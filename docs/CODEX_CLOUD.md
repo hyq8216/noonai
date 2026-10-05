@@ -2,9 +2,26 @@
 
 目标仓库：https://github.com/hyq8216/noonai ，默认分支 main。
 官方依据（2026-10-03 核对）：
-https://learn.chatgpt.com/docs/environments/cloud-environment
+https://learn.chatgpt.com/docs/environments/cloud-environments
 
-在 https://chatgpt.com/codex/settings/environments 创建/选择环境：
+新版环境入口：https://chatgpt.com/settings/codex-cloud 。Legacy 环境是独立入口，
+旧版的 setup 成功不代表新版环境可用。新版实际运行机器可能是普通用户的 Debian，
+不能假定 Ubuntu、root 或 sudo。
+
+新版 Install script 使用 `bash scripts/setup.sh`；Start skill 使用
+`.codex/cloud-start.md` 的启动步骤。每个新 shell 用 `bash scripts/with-runtime.sh`
+恢复 Node 22 和浏览器资产配置。账号环境已准备的浏览器使用
+`/workspace/.noonai-assets/playwright`；普通任务可读取
+`/workspace/.noonai-tools/install.sh` 与 `start.md`，每个 shell 显式恢复路径。
+仓库 helper 保留显式 PLAYWRIGHT_BROWSERS_PATH，优先选择仓库旁的准备资产，
+没有准备资产时才使用本地缓存。普通任务须实际检查浏览器启动；缺失时按同一路径
+执行官方 `npx --prefix scripts/browser playwright install chromium`，不用 sudo。
+本地测试 socket 如被命令沙箱阻止，按正常命令审批执行并如实记录，不能改变安全策略。
+固定浏览器下载需允许官方 CDN 域名
+`cdn.playwright.dev`、`playwright.download.prss.microsoft.com`、`storage.googleapis.com`。
+具体网络策略以账号配置和下载实测为准，不禁用 TLS 或下载校验。
+
+Legacy 配置：
 
 | 项目 | 配置 |
 | --- | --- |
@@ -20,9 +37,8 @@ https://learn.chatgpt.com/docs/environments/cloud-environment
 环境脚本的 export 不会自动传到 agent 阶段，所以每次明确使用 `.venv/bin/python`。
 缓存恢复后执行维护脚本，以匹配当前分支依赖。
 
-账号环境是否已创建、仓库是否能在账号里被选择、setup 是否成功必须在云端页面
-回读验证。提交这些文件不会自动创建 Codex Cloud 账号环境。本轮浏览器控制超时，
-不能声称此账号配置已完成。
+账号环境是否可选、脚本安装成功及新任务恢复均需独立验收；编辑页 Published 提示
+不能替代环境列表和运行结果。提交这些文件不会自动创建或发布账号环境。
 
 ## 开发任务提示词
 

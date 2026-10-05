@@ -33,7 +33,8 @@ class ApprovalBatchTests(unittest.TestCase):
   for _ in range(3):a.tick()
   self.assertEqual(a.state()['items'][0]['status'],'approval');ApprovalBatch(self.s).apply(self.body(p));a.tick();a.tick();self.assertEqual(a.state()['items'][0]['status'],'done')
  def test_auto_submit_requires_ack_and_public_urls(self):
-  p=self.ready();p=self.s.update(p['id'],{},p['revision'],{'images':[{**im,'public_url':'https://example.test/'+im['file']} for im in p['images']]});a=self.app.automation;rid=a.create({'product_ids':[p['id']],'name':'Submit','request_id':'submit','plan':{'submit':True}})['id']
+  p=self.ready();p=self.s.update(p['id'],{},p['revision'],{'images':[{**im,'public_url':'https://example.test/'+im['file']} for im in p['images']]});a=self.app.automation
+  with patch.object(self.app,'config',return_value={'noon_ready':True,'submit_enabled':True}):rid=a.create({'product_ids':[p['id']],'name':'Submit','request_id':'submit','plan':{'submit':True}})['id']
   for _ in range(3):a.tick()
   batch=ApprovalBatch(self.s);b=self.body(p);self.assertEqual(batch.preview(b)['auto_submit'],1)
   with self.assertRaises(Problem):batch.apply(b)

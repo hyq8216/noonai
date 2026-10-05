@@ -11,7 +11,7 @@ import sqlite3
 import time
 import uuid
 from platform_status import summarize
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -106,8 +106,17 @@ class Store:
               id TEXT PRIMARY KEY, product_id TEXT NOT NULL, kind TEXT NOT NULL,
               revision INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
               result TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS submit_reconciliations (
+              job_id TEXT PRIMARY KEY, product_id TEXT NOT NULL, outcome TEXT NOT NULL,
+              partner_sku TEXT NOT NULL, sku_parent TEXT NOT NULL DEFAULT '',
+              evidence TEXT NOT NULL, checked_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS runtime_state (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_products_partner_sku ON products(json_extract(data,'$.partner_sku'));
             CREATE INDEX IF NOT EXISTS idx_products_source_sku ON products(json_extract(data,'$.source_sku'));
+            CREATE INDEX IF NOT EXISTS idx_products_supply_checked_jd_id ON products(julianday(json_extract(data,'$.supply_checked_at')),id)
+              WHERE json_extract(data,'$.supply_checked_at') IS NOT NULL;
+            DROP INDEX IF EXISTS idx_products_supply_checked_jd;
             CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status,updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at DESC);
             ''')
@@ -148,34 +157,99 @@ class Store:
             c.execute('BEGIN')
             latest=c.execute('SELECT coalesce(max(id),0) FROM events').fetchone()[0]
             bucket=int(time.time()//15);token=f'{self.catalog_session}:{latest}:{bucket}'
-            valid=False;last=0;prior_bucket=0
-            if isinstance(known_token,str) and len(known_token)<100:
+            valid=False;last=0;prior_bucket=0;time_state=None
+            if isinstance(known_token,str) and len(known_token)<200:
                 parts=known_token.split(':')
-                if (len(parts)==3 and parts[0]==self.catalog_session and parts[1].isdigit() and
+                if (len(parts) in (3,7) and parts[0]==self.catalog_session and parts[1].isdigit() and
                         len(parts[1])<=19 and parts[2].isdigit() and len(parts[2])<=19):
                     last=int(parts[1]);prior_bucket=int(parts[2])
-                    valid=0<=last<=latest and 0<=prior_bucket<=bucket and bucket-prior_bucket<=5760
+                    if len(parts)==7:
+                        try:target_micros=int(parts[3])
+                        except ValueError:target_micros=-1
+                        phase,cursor_jd,cursor_id=parts[4:7]
+                        cursor_valid=((not cursor_jd and not cursor_id) or
+                            (cursor_jd and cursor_id and len(cursor_id)==32 and
+                             all(ch in '0123456789abcdef' for ch in cursor_id)))
+                        try:cursor_number=float(cursor_jd) if cursor_jd else 0.0
+                        except ValueError:cursor_number=-1.0;cursor_valid=False
+                        target_bucket=target_micros//15_000_000 if target_micros>=0 else -1
+                        valid=(cursor_valid and math.isfinite(cursor_number) and cursor_number>=0 and phase in ('e','f') and
+                            0<=last<=latest and 0<=prior_bucket<=target_bucket<=bucket and
+                            target_micros<10**20 and bucket-target_bucket<=5760)
+                        if valid:time_state=(target_micros,phase,cursor_jd,cursor_id)
+                    else:
+                        valid=0<=last<=latest and 0<=prior_bucket<=bucket and bucket-prior_bucket<=5760
             if valid:
                 # A large import must not turn the next refresh into a full-catalog download.
                 # Advance by event ID, including events without a product, so no mutation is skipped.
                 changes=c.execute('SELECT id,product_id FROM events WHERE id>? ORDER BY id LIMIT 501',(last,)).fetchall()
-                has_more=len(changes)>500
-                if has_more:
+                events_more=len(changes)>500
+                if events_more:
                     changes=changes[:500]
-                    cursor=changes[-1]['id']
-                    page_token=f'{self.catalog_session}:{cursor}:{prior_bucket}'
+                    last=changes[-1]['id']
+                ids={r['product_id'] for r in changes if r['product_id'] is not None}
+                if events_more:
+                    if time_state:
+                        page_token=f'{self.catalog_session}:{last}:{prior_bucket}:{time_state[0]}:{time_state[1]}:{time_state[2]}:{time_state[3]}'
+                    else:page_token=f'{self.catalog_session}:{last}:{prior_bucket}'
+                    ordered_ids=sorted(ids)
+                    items=[self.unpack(r) for r in c.execute('SELECT * FROM products WHERE id IN ('+','.join('?' for _ in ordered_ids)+')',ordered_ids)] if ordered_ids else []
+                    present={p['id'] for p in items}
+                    return {'catalog_token':page_token,'catalog_has_more':True,'product_changes':items,'removed_product_ids':[i for i in ordered_ids if i not in present]}
+
+                time_more=False
+                final_bucket=bucket
+                if time_state or prior_bucket!=bucket:
+                    if time_state:
+                        target_micros,phase,cursor_jd,cursor_id=time_state
+                        current=datetime(1970,1,1,tzinfo=timezone.utc)+timedelta(microseconds=target_micros)
+                    else:
+                        current=datetime.now(timezone.utc)
+                        delta=current-datetime(1970,1,1,tzinfo=timezone.utc)
+                        target_micros=(delta.days*86400+delta.seconds)*1_000_000+delta.microseconds
+                        phase='e';cursor_jd='';cursor_id=''
+                    final_bucket=target_micros//15_000_000
+                    before=datetime.fromtimestamp(prior_bucket*15,timezone.utc)
+                    expression="julianday(json_extract(data,'$.supply_checked_at'))"
+                    def read_time_candidates(which,jd,id_,limit):
+                        if not limit:return [],True
+                        if which=='e':
+                            lower=(before-timedelta(days=1,seconds=1)).isoformat()
+                            upper=(current-timedelta(days=1)+timedelta(seconds=1)).isoformat()
+                        else:
+                            lower=(before+timedelta(seconds=299)).isoformat()
+                            upper=(current+timedelta(seconds=301)).isoformat()
+                        after=f'AND ({expression},id)>(?,?)' if jd else ''
+                        params=[lower,upper]
+                        if jd:params.extend((float(jd),id_))
+                        params.append(limit+1)
+                        rows=c.execute(f"""SELECT id,json_extract(data,'$.supply_checked_at') AS checked_at,{expression} AS checked_jd
+                          FROM products WHERE json_extract(data,'$.supply_checked_at') IS NOT NULL
+                            AND {expression} BETWEEN julianday(?) AND julianday(?) {after}
+                          ORDER BY {expression},id LIMIT ?""",params).fetchall()
+                        return rows[:limit],len(rows)>limit
+                    def include_changed(rows):
+                        for row in rows:
+                            if supply_check_valid_at(row['checked_at'],before)!=supply_check_valid_at(row['checked_at'],current):ids.add(row['id'])
+                    for which in (['e','f'] if phase=='e' else ['f']):
+                        remaining=500-len(ids)
+                        if remaining<=0:
+                            time_more=True;phase=which
+                            break
+                        rows,more=read_time_candidates(which,cursor_jd if which==phase else '',cursor_id if which==phase else '',remaining)
+                        include_changed(rows)
+                        if more:
+                            time_more=True;phase=which
+                            if rows:cursor_jd=format(rows[-1]['checked_jd'],'.17g');cursor_id=rows[-1]['id']
+                            break
+                        cursor_jd='';cursor_id=''
+                        if which=='e':phase='f'
+                    if time_more:
+                        page_token=f'{self.catalog_session}:{latest}:{prior_bucket}:{target_micros}:{phase}:{cursor_jd}:{cursor_id}'
+                    else:page_token=f'{self.catalog_session}:{latest}:{final_bucket}'
                 else:
                     page_token=token
-                ids={r['product_id'] for r in changes if r['product_id'] is not None}
-                if not has_more and prior_bucket!=bucket and len(ids)<=500:
-                    before=datetime.fromtimestamp(prior_bucket*15,timezone.utc)
-                    current=datetime.now(timezone.utc)
-                    for row in c.execute("SELECT id,json_extract(data,'$.supply_checked_at') AS checked_at FROM products"):
-                        if row['checked_at'] is None:continue
-                        if supply_check_valid_at(row['checked_at'],before)!=supply_check_valid_at(row['checked_at'],current):
-                            ids.add(row['id'])
-                            if len(ids)>500:break
-                if not ids and not has_more:return {'catalog_token':token,'catalog_unchanged':True}
+                if not ids and not time_more:return {'catalog_token':page_token,'catalog_unchanged':True}
                 if len(ids)<=500:
                     ids=sorted(ids)
                     if ids:
@@ -183,7 +257,7 @@ class Store:
                         items=[self.unpack(r) for r in c.execute(f'SELECT * FROM products WHERE id IN ({placeholders})',ids)]
                     else:items=[]
                     present={p['id'] for p in items}
-                    return {'catalog_token':page_token,'catalog_has_more':has_more,'product_changes':items,'removed_product_ids':[i for i in ids if i not in present]}
+                    return {'catalog_token':page_token,'catalog_has_more':time_more,'product_changes':items,'removed_product_ids':[i for i in ids if i not in present]}
             return {'catalog_token':token,'products':[self.unpack(r) for r in c.execute('SELECT * FROM products ORDER BY created_at DESC,id')]}
     def import_rows(self, rows, demo=False, connection=None):
         if connection is None:
@@ -304,8 +378,14 @@ class Store:
                 if used >= limit: raise Problem(f'今日翻译任务已达到 {limit} 项上限（UTC日），请明天继续或调整本地配置', 409)
             if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND status IN ('queued','running')", (pid,)).fetchone():
                 raise Problem('此商品已有任务在处理',409)
-            if kind == 'submit' and c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND revision=? AND status IN ('uncertain','needs_attention','interrupted')", (pid,revision)).fetchone():
-                raise Problem('当前版本此前提交结果待核对，请先回查 noon 或修改商品，不能直接重发',409)
+            if kind == 'submit':
+                unresolved=c.execute("""SELECT 1 FROM jobs j WHERE j.product_id=? AND j.kind='submit'
+                    AND j.status IN ('uncertain','needs_attention','interrupted')
+                    AND NOT EXISTS (SELECT 1 FROM submit_reconciliations r WHERE r.job_id=j.id)""",(pid,)).fetchone()
+                if unresolved:
+                    raise Problem('此商品此前的 noon 提交结果待核对；修改商品版本也不能解除拦截，请先在任务记录中核对回执',409)
+                if (p.get('platform') or {}).get('submitted_revision')==revision:
+                    raise Problem('当前版本已有 Noon 提交回执，本次未重复发送',409)
             jid=ident(); ts=now()
             c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',(jid,pid,kind,revision,'queued','等待处理',None,ts,ts))
         return jid
@@ -313,9 +393,62 @@ class Store:
         with self.connect() as c:
             c.execute('UPDATE jobs SET status=?,message=?,result=?,updated_at=? WHERE id=?',
                       (status,message,json.dumps(result,ensure_ascii=False) if result is not None else None,now(),jid))
+    def reconcile_submit(self, job_id, outcome, partner_sku, evidence, sku_parent=''):
+        if outcome not in ('found','absent'):raise Problem('核对结果无效')
+        if not isinstance(evidence,str) or len(evidence.strip())<8 or len(evidence)>500:
+            raise Problem('请记录至少8个字的核对依据，最多500字')
+        if not isinstance(partner_sku,str) or not partner_sku.strip() or len(partner_sku)>100:
+            raise Problem('请输入并核对店铺 SKU')
+        if not isinstance(sku_parent,str):raise Problem('Noon 商品编号格式无效')
+        if outcome=='found' and (not isinstance(sku_parent,str) or not sku_parent.strip() or len(sku_parent)>160):
+            raise Problem('已找到刊登时必须填写 Noon 商品编号')
+        if outcome=='absent' and sku_parent:
+            raise Problem('未找到刊登时不能填写 Noon 商品编号')
+        checked=now()
+        partner_sku=partner_sku.strip();evidence=evidence.strip();sku_parent=sku_parent.strip()
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            job=c.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if not job or job['kind']!='submit':raise Problem('提交任务不存在',404)
+            existing=c.execute('SELECT * FROM submit_reconciliations WHERE job_id=?',(job_id,)).fetchone()
+            if existing:
+                if (existing['outcome'],existing['partner_sku'],existing['sku_parent'],existing['evidence'])==(outcome,partner_sku,sku_parent,evidence):
+                    return {'job_id':job_id,'outcome':outcome,'partner_sku':partner_sku,'sku_parent':sku_parent,
+                            'checked_at':existing['checked_at'],'replayed':True}
+                raise Problem('此提交任务已有人工核对记录，不允许覆盖；请检查任务历史',409)
+            if job['status'] not in ('uncertain','needs_attention','interrupted'):
+                raise Problem('此任务当前无需人工对账',409)
+            product=c.execute('SELECT data FROM products WHERE id=?',(job['product_id'],)).fetchone()
+            if not product:raise Problem('商品不存在',404)
+            data=json.loads(product['data']);sku=data.get('partner_sku','')
+            if partner_sku!=sku:raise Problem('店铺 SKU 不匹配，请核对商品后重试',409)
+            platform=data.get('platform') or {}
+            if outcome=='absent' and (platform.get('sku_parent') or platform.get('submitted_revision')==job['revision']):
+                raise Problem('本地已有平台提交回执，不能登记为“未找到”',409)
+            if job['status']=='needs_attention' and outcome=='absent':
+                raise Problem('平台已返回需处理结果，不能登记为“未找到”；请按已找到刊登记录',409)
+            c.execute('INSERT INTO submit_reconciliations VALUES(?,?,?,?,?,?,?)',
+                      (job_id,job['product_id'],outcome,sku,sku_parent,evidence,checked))
+            if outcome=='found':
+                if platform.get('sku_parent') and platform['sku_parent']!=sku_parent:
+                    raise Problem('已保存的平台商品编号不同，请先核对冲突记录',409)
+                platform.update({'sku_parent':sku_parent,'submitted_revision':job['revision'],
+                    'checked_at':checked,'live_verified':False,'manual_reconciliation':{
+                        'job_id':job_id,'outcome':'found','evidence':evidence,'checked_at':checked}})
+                c.execute('UPDATE products SET data=? WHERE id=?',(json.dumps({**data,'platform':platform},ensure_ascii=False),job['product_id']))
+            self.event(c,job['product_id'],'提交结果人工对账',
+                f"{sku} · {'已找到并记录 Noon 商品 '+sku_parent if outcome=='found' else '已确认未找到刊登，可由操作员重新安排提交'} · 依据：{evidence}")
+        return {'job_id':job_id,'outcome':outcome,'partner_sku':partner_sku,'sku_parent':sku_parent,'checked_at':checked,'replayed':False}
     def recover_jobs(self):
         with self.connect() as c:
-            c.execute("UPDATE jobs SET status='interrupted',message='服务重启中断。提交类任务请先在平台核对，避免重复操作。',updated_at=? WHERE status IN ('queued','running')",(now(),))
+            ts=now()
+            # A queued job has not crossed App.run's atomic queued->running
+            # claim, so it cannot have entered an external call. Keep this
+            # distinct from running work whose request may already have left.
+            # The visual-check worker has its own durable phase contract and
+            # restarts jobs whose saved phase proves dispatch never occurred.
+            c.execute("UPDATE jobs SET status='failed',message='服务重启时任务仍在本地队列，尚未开始外部调用；可重新安排。',updated_at=? WHERE status='queued' AND kind!='visual-check'",(ts,))
+            c.execute("UPDATE jobs SET status='interrupted',message='服务重启时任务已开始执行，外部请求结果可能不确定；提交类任务请先在平台核对，避免重复操作。',updated_at=? WHERE status='running'",(ts,))
     def history(self,include_detail=True):
         with self.connect() as c:
             active_jobs=c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
@@ -332,19 +465,22 @@ class Store:
                 pages=max(1,(total+49)//50);page=min(page,pages-1)
                 rows=[dict(r) for r in c.execute('SELECT * FROM events ORDER BY id DESC LIMIT 50 OFFSET ?',(page*50,))]
             return {'events':rows,'total':total,'page':page,'pages':pages,'page_size':50}
-        groups={'all':'1','active':"status IN ('queued','running','waiting','waiting_image','paused')",
-                'attention':"status IN ('failed','interrupted','needs_attention','uncertain','blocked')",
-                'done':"status='done'",'cancelled':"status='cancelled'"}
+        groups={'all':'1','active':"j.status IN ('queued','running','waiting','waiting_image','paused')",
+                'attention':"j.status IN ('failed','interrupted','needs_attention','uncertain','blocked')",
+                'done':"j.status='done'",'cancelled':"j.status='cancelled'"}
         kinds=('all','translate','submit','refresh','offers','prices','image-host','visual-check')
         if group not in groups or job_kind not in kinds:raise Problem('任务筛选无效')
         where=groups[group];params=[]
-        if job_kind!='all':where+=' AND kind=?';params.append(job_kind)
+        if job_kind!='all':where+=' AND j.kind=?';params.append(job_kind)
         with self.connect() as c:
             c.execute('BEGIN')
-            total=c.execute('SELECT count(*) FROM jobs WHERE '+where,params).fetchone()[0]
+            total=c.execute('SELECT count(*) FROM jobs j WHERE '+where,params).fetchone()[0]
             pages=max(1,(total+49)//50);page=min(page,pages-1)
-            jobs=[dict(r) for r in c.execute('SELECT id,product_id,kind,revision,status,message,created_at,updated_at FROM jobs WHERE '+where+
-                                            ' ORDER BY updated_at DESC,rowid DESC LIMIT 50 OFFSET ?',params+[page*50])]
+            jobs=[dict(r) for r in c.execute('''SELECT j.id,j.product_id,j.kind,j.revision,j.status,j.message,j.created_at,j.updated_at,
+                                            r.outcome AS reconciliation_outcome,r.evidence AS reconciliation_evidence,
+                                            r.checked_at AS reconciled_at,r.sku_parent AS reconciled_sku_parent
+                                            FROM jobs j LEFT JOIN submit_reconciliations r ON r.job_id=j.id WHERE '''+where+
+                                            ' ORDER BY j.updated_at DESC,j.rowid DESC LIMIT 50 OFFSET ?',params+[page*50])]
         return {'jobs':jobs,'total':total,'page':page,'pages':pages,'group':group,'kind':job_kind,'page_size':50}
     def record_offer(self,pid,partner_sku,result,local_revision):
         from offer_status import validate

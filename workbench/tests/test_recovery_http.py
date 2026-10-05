@@ -39,7 +39,7 @@ class RecoveryHTTPTests(unittest.TestCase):
     with self.assertRaises(urllib.error.HTTPError) as denied:call('/api/import',{'products':[{'title_zh':'不能写入'}]})
     self.assertEqual(denied.exception.code,409);self.assertEqual(len(call('/api/state')['products']),2)
     p.terminate();p.wait(timeout=15);p.stderr.close();p,url=start();s=call('/api/state');token=s['token']
-    self.assertEqual([x['id'] for x in s['products']],[pid]);self.assertEqual(s['recovery']['last_restore']['status'],'restored');self.assertTrue(s['media']['paused']);self.assertTrue(s['visuals']['paused'])
+    self.assertEqual([x['id'] for x in s['products']],[pid]);self.assertEqual(s['recovery']['last_restore']['status'],'restored');self.assertIsInstance(s['recovery']['last_restore']['restore_duration_seconds'],int);self.assertIsInstance(s['recovery']['last_restore']['backup_age_at_restore_seconds'],int);self.assertTrue(s['media']['paused']);self.assertTrue(s['visuals']['paused'])
     rollback=s['recovery']['last_restore']['rollback_archive_id'];stage=call('/api/backup/inspect',raw=call('/api/backup/download/'+rollback))
     call('/api/backup/schedule',{**stage,'confirmed':True});p.terminate();p.wait(timeout=15);p.stderr.close();p,url=start();s=call('/api/state');self.assertEqual(len(s['products']),2)
    finally:

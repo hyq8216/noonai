@@ -89,6 +89,10 @@ class SourceLeads:
     def export(self,page=0):
         if isinstance(page,bool) or not str(page).isdecimal() or not 0<=int(page)<=100000:raise Problem('导出页码无效')
         with self.store.connect() as c:
-            urls=[row[0] for row in c.execute('SELECT url FROM source_leads ORDER BY created_at,rowid LIMIT 5000 OFFSET ?',(int(page)*5000,))]
+            c.execute('BEGIN')
+            index=int(page)
+            total=c.execute('SELECT count(*) FROM source_leads').fetchone()[0]
+            urls=[row[0] for row in c.execute('SELECT url FROM source_leads ORDER BY created_at,rowid LIMIT 5000 OFFSET ?',(index*5000,))]
             found=self.cataloged(c,urls)
-        return {'urls':[url for url in urls if url not in found],'page':int(page),'source_count':len(urls),'has_more':len(urls)==5000}
+        return {'urls':[url for url in urls if url not in found],'page':index,'source_count':len(urls),
+                'has_more':(index+1)*5000<total}

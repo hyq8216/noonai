@@ -1,4 +1,5 @@
 import json,sys,tempfile,unittest,uuid
+from datetime import datetime,timezone,timedelta
 from pathlib import Path
 from unittest.mock import patch
 from PIL import Image
@@ -6,10 +7,14 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from server import App
 from core import Problem,now
 from visuals import CHECKS
+from test_visuals import synthetic_output
 class WorkflowVisualTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.app=App(self.root/'data');self.s=self.app.store;self.a=self.app.automation
-  self.kick=patch.object(self.app.visuals,'kick');self.kick.start();self.image=self.root/'reference.png';Image.new('RGB',(1600,1600),'gray').save(self.image)
+  self.scheduler_time=[datetime.now(timezone.utc)];self.a.clock=lambda:self.scheduler_time[0];tick=self.a.tick
+  def advance_tick():self.scheduler_time[0]+=timedelta(seconds=6);return tick()
+  self.a.tick=advance_tick
+  self.kick=patch.object(self.app.visuals,'kick');self.kick.start();self.image=self.root/'reference.png';Image.new('RGB',(1600,1600),'gray').save(self.image);self.output=synthetic_output(self.root/'candidate.png')
   self.pid=self.s.import_rows([{'title_zh':'灰盒','facts':'One gray box','supplier':'QA','source_url':'https://detail.1688.com/offer/123.html'}])['created'][0]
   self.app.media.ingest(self.image,'原图','Synthetic QA',self.pid)
   self.opt={'shots':['hero','scene'],'model':'gpt-6-sol','aspect':'square','style':'Soft studio light','auto_check':False}
@@ -20,7 +25,9 @@ class WorkflowVisualTests(unittest.TestCase):
   b=self.body();pre=self.a.preflight(b);self.assertEqual(pre['eligible_ids'],[self.pid]);self.a.create({**b,'preflight_token':pre['token']});self.a.tick();self.a.tick();return self.item()['data']['ai_visual']
  def item(self):return self.a.state()['items'][0]
  def candidate(self,jid,approve=False):
-  a=self.app.media.ingest(self.image,'成片','Synthetic QA',self.pid)
+  shot=self.app.visuals.get(jid)['recipe']['shot'];color=(65,76,89) if shot=='hero' else (115,95,75)
+  output=synthetic_output(self.root/(jid+'.png'),color=color)
+  a=self.app.media.ingest(output,'成片','Synthetic QA',self.pid)
   with self.s.connect() as c:
    asset=json.loads(c.execute('SELECT data FROM media_assets WHERE id=?',(a['id'],)).fetchone()[0]);asset.update(visual_job_id=jid,parents=[]);c.execute('UPDATE media_assets SET data=? WHERE id=?',(json.dumps(asset),a['id']))
   self.app.visuals.update(jid,'candidate','Synthetic candidate',asset_id=a['id']);j=self.app.visuals.get(jid)
@@ -46,7 +53,8 @@ class WorkflowVisualTests(unittest.TestCase):
   self.a.tick();self.assertEqual(self.item()['status'],'waiting')
   with self.s.connect() as c:
    for jid in link['check_ids']:c.execute("UPDATE jobs SET status='done',result=? WHERE id=?",(json.dumps({'report':{'verdict':'mismatch'}}),jid))
-  self.a.tick();self.assertEqual(self.item()['status'],'attention');self.assertEqual(self.s.get(self.pid)['images'],[])
+  # A mismatch is a human review gate, not a retryable process failure.
+  self.a.tick();self.assertEqual(self.item()['status'],'approval');self.assertEqual(self.s.get(self.pid)['images'],[])
  def test_identity_change_stops_and_retry_keeps_child_ids(self):
   link=self.start();p=self.s.get(self.pid);p=self.s.update(self.pid,{'facts':'Now two red boxes'},p['revision']);self.a.tick();self.assertEqual(self.item()['status'],'attention')
   self.a.control({'action':'retry','item_id':self.item()['id'],'revision':p['revision']});self.a.tick();self.assertEqual(self.item()['status'],'attention');self.assertEqual(self.item()['data']['ai_visual'],link);self.assertEqual(len(self.app.visuals.state()['jobs']),2)

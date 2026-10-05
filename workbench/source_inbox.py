@@ -252,13 +252,19 @@ class SourceInbox:
         if not old or (old['status'],old['message'],old['result'])!=(status,message,encoded):
             self.record(name,digest,status,message,result)
 
+    def read_children(self,folder,label):
+        try:return list(folder.iterdir())
+        except OSError as exc:
+            self.last_error=f'{label}目录无法读取：{exc}'
+            return []
+
     def tick(self):
         with self.lock:
             with self.app.store.connect() as c:config=self.config(c)
             if not config['enabled']:return
             if self.folder.is_symlink() or self.updates.is_symlink() or self.photos.is_symlink() or self.videos.is_symlink():raise Problem('投递箱目录不能是快捷链接')
             for kind,folder in (('new',self.folder),('updates',self.updates)):
-                names=sorted((p for p in folder.iterdir() if p.suffix.lower() in ('.csv','.json') and not p.is_symlink() and p.is_file()),key=lambda p:p.name)
+                names=sorted((p for p in self.read_children(folder,kind) if p.suffix.lower() in ('.csv','.json') and not p.is_symlink() and p.is_file()),key=lambda p:p.name)
                 selected,self.catalog_cursors[kind]=rotating_paths(names,self.catalog_cursors[kind],CATALOG_SCAN_LIMIT)
                 self.scan_progress[kind]={'checked':len(selected),'total':len(names)}
                 for path in selected:
@@ -269,11 +275,11 @@ class SourceInbox:
                 catalog_event=c.execute("SELECT coalesce(max(id),0) FROM events WHERE action IN ('导入','规格标识更新')").fetchone()[0]
                 auto_video_enabled=self.video_config(c)['enabled']
             photo_paths=[]
-            for folder in sorted(p for p in self.photos.iterdir() if p.is_dir() and not p.is_symlink()):
+            for folder in sorted(p for p in self.read_children(self.photos,'原图') if p.is_dir() and not p.is_symlink()):
                 if not re.fullmatch(r'[A-Za-z0-9._-]{1,100}',folder.name):
                     self.last_error='原图 SKU 文件夹只能使用英文字母、数字、点、下划线和连字符'
                     continue
-                for path in sorted(folder.iterdir()):
+                for path in sorted(self.read_children(folder,'原图 '+folder.name)):
                     if path.suffix.lower() not in ('.jpg','.jpeg','.png','.webp') or path.is_symlink() or not path.is_file():continue
                     if not re.fullmatch(r'[A-Za-z0-9._-]{1,250}',path.name):
                         self.last_error=f'photos/{folder.name}：图片文件名含不支持的字符'
@@ -292,11 +298,11 @@ class SourceInbox:
                 except (OSError,UnicodeError,ValueError,Problem) as exc:
                     self.last_error=f'photos/{folder.name}/自动生图：{exc}'
             video_paths=[]
-            for folder in sorted(p for p in self.videos.iterdir() if p.is_dir() and not p.is_symlink()):
+            for folder in sorted(p for p in self.read_children(self.videos,'原视频') if p.is_dir() and not p.is_symlink()):
                 if not re.fullmatch(r'[A-Za-z0-9._-]{1,100}',folder.name):
                     self.last_error='原视频 SKU 文件夹只能使用英文字母、数字、点、下划线和连字符'
                     continue
-                for path in sorted(folder.iterdir()):
+                for path in sorted(self.read_children(folder,'原视频 '+folder.name)):
                     if path.suffix.lower() not in VIDEO_EXTENSIONS or path.is_symlink() or not path.is_file():continue
                     if not re.fullmatch(r'[A-Za-z0-9._-]{1,250}',path.name):
                         self.last_error=f'videos/{folder.name}：视频文件名含不支持的字符'
@@ -646,6 +652,7 @@ class SourceInbox:
         created_rows=[]
         run_ids=[]
         issue_examples=[]
+        issue_rows=[]
         seen_fingerprints=set()
         for index,(group,_) in enumerate(batches):
             kept=[];original_rows=[]
@@ -653,10 +660,12 @@ class SourceInbox:
                 number=index*500+position
                 if number in conflicting_rows or number in duplicate_rows:
                     skipped+=1
+                    issue={'row':number,'status':'blocked' if number in conflicting_rows else 'duplicate',
+                           'reason':'同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
+                                   '同一货源与规格在文件中重复，仅保留第一条'}
+                    issue_rows.append(issue)
                     if len(issue_examples)<5:
-                        issue_examples.append({'row':number,'reason':
-                            '同一货源与规格在文件不同位置的商品资料矛盾，请修正后重新投递' if number in conflicting_rows else
-                            '同一货源与规格在文件中重复，仅保留第一条'})
+                        issue_examples.append(issue)
                 else:
                     kept.append(raw);original_rows.append(number)
             if not kept:
@@ -690,11 +699,12 @@ class SourceInbox:
                     created_rows.append({**item,'row':original_rows[position]})
             skipped+=len(kept)-len(result['created'])
             for issue in result.get('skipped',[]):
-                if len(issue_examples)>=5:break
                 position=int(issue.get('row',0))-1
                 if not 0<=position<len(original_rows):continue
-                issue_examples.append({'row':original_rows[position],
-                                       'reason':str(issue.get('reason','未导入'))[:200]})
+                entry={'row':original_rows[position],'status':issue.get('status','blocked'),
+                       'reason':str(issue.get('reason','未导入'))[:200]}
+                issue_rows.append(entry)
+                if len(issue_examples)<5:issue_examples.append(entry)
             queued+=result.get('processing',{}).get('queued',0)
             waiting+=len(result.get('processing',{}).get('waiting',[]))
             run_id=result.get('processing',{}).get('run_id')
@@ -703,10 +713,13 @@ class SourceInbox:
                         {'batches_done':index+1,'batches_total':total,'cataloged':cataloged,'skipped':skipped,'run_ids':run_ids})
         message=f'自动分成 {total} 批；已归集 {cataloged} 件，跳过 {skipped} 行；'+(
             '等待原图到齐后启动图文流程' if auto_visual else f'自动加工排队 {queued} 件，待补资料或配置 {waiting} 件')
+        issue_rows.sort(key=lambda item:item['row'])
+        issue_examples.sort(key=lambda item:item['row'])
         self.record(name,file_digest,'done' if cataloged else 'attention',message if cataloged else message+'；没有可归集的商品，请核对表头和前几项原因',
                     {'batches_done':total,'batches_total':total,'cataloged':cataloged,'newly_created_this_scan':newly_created,'skipped':skipped,
                      'queued':queued,'waiting':waiting,'run_ids':run_ids,'issue_examples':issue_examples,
-                     'created_rows':created_rows,'mapping_complete':len(created_rows)==cataloged})
+                     'created_rows':created_rows,'mapping_complete':len(created_rows)==cataloged,
+                     'issue_rows':issue_rows})
         return True
 
     def process_large_updates(self,name,file_digest,suffix,content):
@@ -727,14 +740,17 @@ class SourceInbox:
         conflicting={pid for pid,count in product_counts.items() if count>1}
         updated=unchanged=skipped=0
         issue_examples=[]
+        issue_rows=[]
         for index,(group,initial) in enumerate(batches):
             kept=[];original_rows=[]
             for position,(raw,item) in enumerate(zip(group,initial['rows']),1):
                 if item.get('product_id') in conflicting:
                     skipped+=1
+                    issue={'row':index*500+position,'status':'blocked',
+                           'reason':'同一商品在文件中出现多次；请合并更新资料后重新投递'}
+                    issue_rows.append(issue)
                     if len(issue_examples)<5:
-                        issue_examples.append({'row':index*500+position,
-                                               'reason':'同一商品在文件中出现多次；请合并更新资料后重新投递'})
+                        issue_examples.append(issue)
                 else:
                     kept.append(raw);original_rows.append(index*500+position)
             if kept:
@@ -747,18 +763,22 @@ class SourceInbox:
                 unchanged+=preview['unchanged']
                 skipped+=len(kept)-len(result['updated'])-preview['unchanged']
                 for item in preview['rows']:
-                    if len(issue_examples)>=5:break
                     if item['status'] in ('blocked','duplicate'):
-                        issue_examples.append({'row':original_rows[item['row']-1],
-                                               'reason':item['reason'][:200]})
+                        entry={'row':original_rows[item['row']-1],'status':item['status'],
+                               'reason':item['reason'][:200]}
+                        issue_rows.append(entry)
+                        if len(issue_examples)<5:issue_examples.append(entry)
             self.record(name,file_digest,'processing',f'已处理 {index+1}/{total} 批，本轮更新 {updated} 件',
                         {'batches_done':index+1,'batches_total':total,'updated':updated,
                          'unchanged':unchanged,'skipped':skipped})
         status='done' if updated or unchanged else 'attention'
         message=f'自动分成 {total} 批；本轮更新 {updated} 件，未变化 {unchanged} 件，跳过 {skipped} 行；需重新核对供货与审核，未同步 noon'
+        issue_rows.sort(key=lambda item:item['row'])
+        issue_examples.sort(key=lambda item:item['row'])
         self.record(name,file_digest,status,message,
                     {'batches_done':total,'batches_total':total,'updated':updated,
-                     'unchanged':unchanged,'skipped':skipped,'issue_examples':issue_examples})
+                     'unchanged':unchanged,'skipped':skipped,'issue_examples':issue_examples,
+                     'issue_rows':issue_rows})
         return True
 
     def check_file(self,path,config,kind='new'):

@@ -5,8 +5,10 @@ from core import Problem
 class WorkflowHostTests(unittest.TestCase):
  setUp=fixtures.ImageHostTests.setUp
  tearDown=fixtures.ImageHostTests.tearDown
- def begin(self):
-  p=self.s.get(self.pid);self.s.update(self.pid,{'source_url':'https://detail.1688.com/offer/1.html','supplier':'QA'},p['revision']);self.a=self.app.automation
+ def begin(self,confirm_images=True):
+  p=self.s.get(self.pid);p=self.s.update(self.pid,{'source_url':'https://detail.1688.com/offer/1.html','supplier':'QA'},p['revision'])
+  if confirm_images:p=self.s.update(p['id'],{'images_verified':True},p['revision'])
+  self.a=self.app.automation
   b={'product_ids':[self.pid],'name':'自动托管','request_id':'host-flow','plan':{'image_host':True}}
   pre=self.a.preflight(b);self.assertEqual(pre['eligible_ids'],[self.pid]);self.r=self.a.create({**b,'preflight_token':pre['token']});self.a.tick();return b
  def item(self):return self.a.state()['items'][0]
@@ -27,7 +29,7 @@ class WorkflowHostTests(unittest.TestCase):
   self.a.tick();self.assertEqual(self.item()['status'],'attention');self.a.tick();self.assertEqual(self.item()['data']['host_job'],jid)
   self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']});new,_,_=self.dispatch();self.assertNotEqual(new,jid)
  def test_unconfirmed_images_wait_then_resume(self):
-  p=self.s.get(self.pid);self.s.update(self.pid,{},p['revision'],{'images_verified':False});self.begin();self.a.tick();self.assertEqual(self.item()['status'],'approval')
+  p=self.s.get(self.pid);self.s.update(self.pid,{},p['revision'],{'images_verified':False});self.begin(confirm_images=False);self.a.tick();self.assertEqual(self.item()['status'],'approval')
   p=self.s.get(self.pid);self.s.update(self.pid,{'images_verified':True},p['revision']);self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']});self.assertTrue(self.dispatch())
  def test_changed_config_does_not_upload_to_new_destination(self):
   self.begin();self.h.save({**self.config,'revision':self.h.state()['revision']})
