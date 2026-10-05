@@ -204,10 +204,18 @@ class Automation:
         ready={role:self.app.models.ready(role) for role in ('primary','review')}
         config=self.app.config();rows=[]
         host_config=self.app.image_host.state() if plan.get('image_host') else None
-        visual_preview=self.app.visual_batch.preview({'product_ids':ids,**plan['ai_visual']},c) if plan.get('ai_visual') else None
+        existing_ids={r['id'] for r in c.execute('SELECT id FROM products WHERE id IN ('+','.join('?' for _ in ids)+')',ids)}
+        visual_ids=[pid for pid in ids if pid in existing_ids]
+        visual_preview=self.app.visual_batch.preview({'product_ids':visual_ids,**plan['ai_visual']},c) if plan.get('ai_visual') and visual_ids else None
         visual_rows={r['id']:r for r in visual_preview['rows']} if visual_preview else {}
         for pid in ids:
-            p=self.store.unpack(c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone())
+            raw=c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone()
+            if raw is None:
+                rows.append({'id':pid,'revision':None,'title':'商品不存在','sku':'','status':'blocked',
+                    'reasons':['商品不存在或已删除，请刷新目录后重新选择'],'missing_fields':[],
+                    'translate':False,'review':False,'images':False,'visual':None,'issues':[]})
+                continue
+            p=self.store.unpack(raw)
             missing=[k for k in CONTENT_FIELDS if not p.get(k,'').strip()]
             translation=plan['translate'] and (not plan.get('missing_only') or bool(missing))
             review=plan['review'] and not (plan.get('missing_only') and p.get('content_verified') and not missing and not translation)

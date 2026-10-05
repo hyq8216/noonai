@@ -294,6 +294,19 @@ class HttpTests(unittest.TestCase):
             self.call('/api/catalog-campaign/preview',{'product_ids':['bad-\ud800'],'plan':{'translate':False}},headers)
         self.assertEqual(failed.exception.code,400)
         self.assertEqual(self.app.automation.state()['runs'],[])
+    def test_catalog_campaign_http_preview_isolates_deleted_product_id(self):
+        headers={'X-Workbench-Token':self.app.token}
+        created=self.app.store.import_rows([{'title_zh':'HTTP campaign survivor',
+            'source_url':'https://supplier.example/http-campaign-survivor',
+            'source_sku':'HTTP-CAMPAIGN-SURVIVOR','supplier':'Synthetic supplier',
+            'facts':'Black plastic organizer, 10 pieces'}])['created']
+        missing_id='http-deleted-product-not-in-catalog'
+        result=json.loads(self.call('/api/catalog-campaign/preview',{
+            'product_ids':[created[0],missing_id],'plan':{'translate':False}},headers).read())
+        self.assertEqual(result['totals']['ready'],1)
+        self.assertEqual(result['totals']['blocked'],1)
+        self.assertEqual(result['exception_rows'][0]['id'],missing_id)
+        self.assertEqual(self.app.automation.state()['runs'],[])
     def test_direct_product_import_rejects_unencodable_unicode_before_database_write(self):
         before=len(self.app.store.list())
         headers={'X-Workbench-Token':self.app.token}

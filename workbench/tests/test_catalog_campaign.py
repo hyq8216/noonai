@@ -153,6 +153,33 @@ class CatalogCampaignTests(unittest.TestCase):
                 "SELECT count(*) FROM ops_requests WHERE key LIKE 'catalog-campaign:%'"
             ).fetchone()[0], 0)
 
+    def test_campaign_isolates_deleted_product_from_valid_selection(self):
+        valid_id = self.products(1)[0]
+        missing_id = 'deleted-product-no-longer-in-catalog'
+        body = self.body([valid_id, missing_id], request_id='deleted-product-isolation')
+
+        preview = self.campaign.preview(body)
+        self.assertEqual(preview['totals']['ready'], 1)
+        self.assertEqual(preview['totals']['blocked'], 1)
+        self.assertEqual(preview['exception_rows'][0]['id'], missing_id)
+        self.assertEqual(preview['exception_rows'][0]['status'], 'blocked')
+        self.assertIn('不存在', preview['exception_rows'][0]['reasons'][0])
+
+        visual_preview = self.app.automation.preflight({
+            'product_ids': [valid_id, missing_id],
+            'plan': {'ai_visual': {'shots': ['hero'], 'model': 'gpt-6-luna',
+                                   'aspect': 'square', 'style': '柔和棚拍灯光'}}
+        })
+        self.assertEqual([row['id'] for row in visual_preview['rows']], [valid_id, missing_id])
+        self.assertEqual(visual_preview['rows'][1]['status'], 'blocked')
+
+        queued = self.campaign.apply({**body, 'preview_token': preview['token']})
+        self.assertEqual(queued['totals']['ready'], 1)
+        self.assertEqual([run['ready'] for run in queued['runs']], [1])
+        self.assertEqual(self.app.automation.state()['run_item_counts'][queued['runs'][0]['id']], 1)
+        exceptions = self.campaign.exceptions(body['request_id'])['rows']
+        self.assertEqual([row['id'] for row in exceptions], [missing_id])
+
     def test_full_5000_catalog_campaign_creates_ten_exactly_sized_runs_and_replays(self):
         ids = self.products(5000)
         body = self.body(ids, plan={'translate': False}, request_id='full-catalog-5000')
