@@ -175,6 +175,72 @@ class CatalogCampaignTests(unittest.TestCase):
         self.assertTrue(replay['replayed'])
         self.assertEqual(len(self.app.automation.state()['runs']), 10)
 
+    def test_5000_catalog_campaign_preserves_exceptions_at_every_chunk_boundary(self):
+        ids = self.products(5000)
+        # Put one blocked product at the end of every 500-item chunk. This
+        # exercises exception-to-chunk mapping across both full and final
+        # boundaries while keeping each chunk eligible for creation.
+        blocked_ids = [ids[end - 1] for end in range(500, 5001, 500)]
+        for product_id in blocked_ids:
+            product = self.store.get(product_id)
+            self.store.update(product_id, {'facts': ''}, product['revision'])
+
+        body = self.body(ids, plan={'translate': False}, request_id='mixed-catalog-5000')
+        preview = self.campaign.preview(body)
+        self.assertEqual([chunk['count'] for chunk in preview['chunks']], [500] * 10)
+        self.assertEqual([chunk['ready'] for chunk in preview['chunks']], [499] * 10)
+        self.assertEqual([chunk['blocked'] for chunk in preview['chunks']], [1] * 10)
+        self.assertEqual(preview['totals']['ready'], 4990)
+        self.assertEqual(preview['totals']['blocked'], 10)
+        self.assertEqual([row['id'] for row in preview['exception_rows']], blocked_ids)
+
+        queued = self.campaign.apply({**body, 'preview_token': preview['token']})
+        self.assertEqual([run['index'] for run in queued['runs']], list(range(1, 11)))
+        self.assertEqual([run['ready'] for run in queued['runs']], [499] * 10)
+        self.assertEqual(queued['skipped'], 10)
+        self.assertEqual(sum(self.app.automation.state()['run_item_counts'][run['id']]
+                             for run in queued['runs']), 4990)
+        exceptions = self.campaign.exceptions(body['request_id'])
+        self.assertEqual([row['sku'] for row in exceptions['rows']],
+                         [self.store.get(product_id)['partner_sku'] for product_id in blocked_ids])
+
+        replay = self.campaign.apply({**body, 'preview_token': preview['token']})
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(len(self.app.automation.state()['runs']), 10)
+
+    def test_5000_campaign_separates_active_and_blocked_products(self):
+        ids = self.products(5000)
+        active_id, blocked_id = ids[498], ids[499]
+        active_body = {'product_ids': [active_id], 'plan': {'translate': False},
+                       'name': '已存在的合成流程', 'request_id': 'existing-active-catalog-item'}
+        active_preview = self.app.automation.preflight(active_body)
+        active_run = self.app.automation.create({**active_body, 'preflight_token': active_preview['token']})
+        product = self.store.get(blocked_id)
+        self.store.update(blocked_id, {'facts': ''}, product['revision'])
+
+        body = self.body(ids, plan={'translate': False}, request_id='active-and-blocked-5000')
+        preview = self.campaign.preview(body)
+        self.assertEqual(preview['totals']['ready'], 4998)
+        self.assertEqual(preview['totals']['blocked'], 1)
+        self.assertEqual(preview['totals']['active'], 1)
+        self.assertEqual(preview['chunks'][0]['ready'], 498)
+        self.assertEqual(preview['chunks'][0]['active'], 1)
+        self.assertEqual(preview['chunks'][0]['blocked'], 1)
+        self.assertEqual([(row['id'], row['status']) for row in preview['exception_rows']],
+                         [(active_id, 'active'), (blocked_id, 'blocked')])
+
+        queued = self.campaign.apply({**body, 'preview_token': preview['token']})
+        self.assertEqual(queued['skipped'], 2)
+        self.assertEqual([run['ready'] for run in queued['runs']], [498] + [500] * 9)
+        counts = self.app.automation.state()['run_item_counts']
+        self.assertEqual(sum(counts[run['id']] for run in queued['runs']), 4998)
+        with self.store.connect() as connection:
+            self.assertEqual(connection.execute(
+                'SELECT count(*) FROM automation_items WHERE run_id=?',
+                (active_run['id'],)).fetchone()[0], 1)
+        exceptions = self.campaign.exceptions(body['request_id'])['rows']
+        self.assertEqual([row['status'] for row in exceptions], ['active', 'blocked'])
+
     def test_failure_after_second_chunk_creation_rolls_back_and_same_request_retries(self):
         ids = self.products(501)
         body = self.body(ids, plan={'translate': False}, request_id='rollback-after-chunk-two')
