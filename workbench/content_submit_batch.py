@@ -47,8 +47,10 @@ class ContentSubmitBatch:
                 reasons.append('当前版本已获得平台提交回执，先回查或修改商品')
             if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND status IN ('queued','running')", (pid,)).fetchone():
                 reasons.append('商品已有处理任务')
-            if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND revision=? AND status IN ('uncertain','needs_attention','interrupted')", (pid,p['revision'])).fetchone():
-                reasons.append('此前提交结果待核对，不能直接重发当前版本')
+            if c.execute("""SELECT 1 FROM jobs j WHERE j.product_id=? AND j.kind='submit'
+                AND j.status IN ('uncertain','needs_attention','interrupted')
+                AND NOT EXISTS (SELECT 1 FROM submit_reconciliations r WHERE r.job_id=j.id)""", (pid,)).fetchone():
+                reasons.append('此商品此前提交结果待核对；修改版本也不能解除拦截，请先核对noon回执')
             rows.append({'id': pid, 'title': p['title_zh'], 'sku': p['partner_sku'], 'revision': p['revision'],
                          'status': 'blocked' if reasons else 'ready', 'reasons': reasons})
         ready = sum(r['status'] == 'ready' for r in rows)

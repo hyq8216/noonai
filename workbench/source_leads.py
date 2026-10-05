@@ -25,7 +25,10 @@ class SourceLeads:
 
     def preview(self,body,connection=None):
         raw=body.get('links')
-        if not isinstance(raw,str) or not raw.strip() or len(raw.encode('utf-8'))>1024*1024:raise Problem('请粘贴不超过1MB的货源链接清单')
+        if not isinstance(raw,str) or not raw.strip():raise Problem('请粘贴不超过1MB的货源链接清单')
+        try:size=len(raw.encode('utf-8'))
+        except UnicodeEncodeError:raise Problem('货源链接清单含有无效Unicode字符，请检查后重试')
+        if size>1024*1024:raise Problem('请粘贴不超过1MB的货源链接清单')
         lines=[line.strip() for line in raw.splitlines() if line.strip()]
         if len(lines)>LIMIT:raise Problem('每批最多5000条链接，请拆分导入')
         if connection is None:
@@ -60,7 +63,8 @@ class SourceLeads:
         if not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9-]{1,96}',key):raise Problem('请求编号无效')
         if body.get('confirmed') is not True:raise Problem('请确认只登记尚未存在的货源链接')
         request_key='source-leads:'+key
-        fingerprint=hashlib.sha256(json.dumps([body.get('links'),body.get('preview_token')],ensure_ascii=False).encode()).hexdigest()
+        try:fingerprint=hashlib.sha256(json.dumps([body.get('links'),body.get('preview_token')],ensure_ascii=False).encode('utf-8')).hexdigest()
+        except UnicodeEncodeError:raise Problem('货源链接清单含有无效Unicode字符，请重新预览')
         with self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             old=c.execute('SELECT digest,result FROM ops_requests WHERE key=?',(request_key,)).fetchone()
@@ -89,6 +93,10 @@ class SourceLeads:
     def export(self,page=0):
         if isinstance(page,bool) or not str(page).isdecimal() or not 0<=int(page)<=100000:raise Problem('导出页码无效')
         with self.store.connect() as c:
-            urls=[row[0] for row in c.execute('SELECT url FROM source_leads ORDER BY created_at,rowid LIMIT 5000 OFFSET ?',(int(page)*5000,))]
+            c.execute('BEGIN')
+            index=int(page)
+            total=c.execute('SELECT count(*) FROM source_leads').fetchone()[0]
+            urls=[row[0] for row in c.execute('SELECT url FROM source_leads ORDER BY created_at,rowid LIMIT 5000 OFFSET ?',(index*5000,))]
             found=self.cataloged(c,urls)
-        return {'urls':[url for url in urls if url not in found],'page':int(page),'source_count':len(urls),'has_more':len(urls)==5000}
+        return {'urls':[url for url in urls if url not in found],'page':index,'source_count':len(urls),
+                'has_more':(index+1)*5000<total}

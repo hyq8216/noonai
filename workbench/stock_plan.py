@@ -24,9 +24,11 @@ class StockPlan:
         buffer=whole(body.get('buffer',0),'安全缓冲')
         cap=whole(body.get('cap'),'单SKU上限',True)
         code=body.get('warehouse_code','')
-        if not isinstance(code,str) or len(code)>80 or (code and not re.fullmatch(r'[A-Za-z0-9_-]+',code)):
+        if not isinstance(code,str) or len(code)>80:
             raise Problem('noon集成仓库编码格式无效')
         code=code.strip()
+        if code and not re.fullmatch(r'[A-Za-z0-9_-]+',code):
+            raise Problem('noon集成仓库编码格式无效')
         with self.store.connect() as c:
             warehouse=c.execute("SELECT id,name FROM ops_entities WHERE id=? AND kind='warehouse'",(warehouse_id,)).fetchone()
             if not warehouse:raise Problem('本地仓库不存在',404)

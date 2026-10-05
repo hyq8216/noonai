@@ -3,16 +3,20 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from PIL import Image, ImageOps, ImageCms, ImageEnhance, ImageDraw, ImageFont, features
+import arabic_reshaper
+from bidi.algorithm import get_display
 from core import Problem, ident, now
 
 Image.MAX_IMAGE_PIXELS=24_000_000
@@ -38,6 +42,8 @@ def bounded(value,low,high,label):
 
 def string(value,maximum,label,required=False):
     if not isinstance(value,str) or len(value)>maximum or (required and not value.strip()):raise Problem(label+'为空或格式无效')
+    try:value.encode('utf-8')
+    except UnicodeEncodeError:raise Problem(label+'含有无效Unicode字符')
     return value.strip()
 
 
@@ -94,7 +100,6 @@ def jpeg(im,path):
 def draw_text(draw,value,box,size,color='#19242c'):
     if not value:return
     is_ar=bool(re.search('[\u0600-\u06ff]',value))
-    if is_ar and not features.check('raqm'):raise Problem('当前图片引擎不支持阿文排版，请更换环境或使用英文模板')
     paths=['/System/Library/Fonts/Supplemental/Arial Unicode.ttf','/System/Library/Fonts/PingFang.ttc','/System/Library/Fonts/Helvetica.ttc']
     # Linux cloud runners do not have macOS fonts. Select a font that covers
     # the requested script rather than silently rendering Chinese as boxes.
@@ -106,17 +111,40 @@ def draw_text(draw,value,box,size,color='#19242c'):
     font_path=next((p for p in paths if Path(p).is_file()),None)
     if not font_path:raise Problem('模板字体不可用')
     font=ImageFont.truetype(font_path,size)
-    opts={'direction':'rtl'} if is_ar else {}
-    width=box[2]-box[0];lines=[];line=''
-    for ch in value:
-        if ch=='\n' or (line and draw.textlength(line+ch,font=font,**opts)>width):lines.append(line);line='' if ch=='\n' else ch
-        else:line+=ch
-    if line:lines.append(line)
+    use_raqm=is_ar and features.check('raqm')
+    opts={'direction':'rtl'} if use_raqm else {}
+    def display(line):
+        if is_ar and not use_raqm:return get_display(arabic_reshaper.reshape(line))
+        return line
+    width=box[2]-box[0];lines=[]
+    for paragraph in value.split('\n'):
+        line=''
+        for word in re.findall(r'\S+|\s+',paragraph):
+            if word.isspace():
+                if line:line+=word
+                continue
+            candidate=line+word
+            if draw.textlength(display(candidate),font=font,**opts)<=width:
+                line=candidate;continue
+            if line:lines.append(line.rstrip());line=''
+            clusters=[]
+            for char in word:
+                if clusters and (unicodedata.combining(char) or char=='\u200d' or clusters[-1].endswith('\u200d')):
+                    clusters[-1]+=char
+                else:clusters.append(char)
+            for cluster in clusters:
+                if line and draw.textlength(display(line+cluster),font=font,**opts)>width:
+                    lines.append(line.rstrip());line=''
+                if draw.textlength(display(cluster),font=font,**opts)>width:
+                    raise Problem('模板文字包含无法排入画布的字符，请缩短说明')
+                line+=cluster
+        if line.strip() or not paragraph:lines.append(line.rstrip())
     lineheight=int(size*1.45)
     if len(lines)*lineheight>box[3]-box[1]:raise Problem('模板文字太长，请缩短标题或说明，避免成图截字')
     for i,line in enumerate(lines):
-        x=box[2]-draw.textlength(line,font=font,**opts) if is_ar else box[0]
-        draw.text((x,box[1]+i*lineheight),line,font=font,fill=color,**opts)
+        rendered=display(line)
+        x=box[2]-draw.textlength(rendered,font=font,**opts) if is_ar else box[0]
+        draw.text((x,box[1]+i*lineheight),rendered,font=font,fill=color,**opts)
 
 
 class Media:
@@ -149,6 +177,7 @@ class Media:
     def kick(self):
         if not self.stopping.is_set():self.pool.submit(self.drain)
     def get(self,aid,c=None):
+        aid=string(aid,100,'素材编号',True)
         if c is None:
             with self.store.connect() as db:return self.get(aid,db)
         row=c.execute('SELECT data FROM media_assets WHERE id=?',(aid,)).fetchone()
@@ -222,16 +251,33 @@ class Media:
             if connection is None:self.store.get(product_id)
             else:self.store.unpack(connection.execute('SELECT * FROM products WHERE id=?',(product_id,)).fetchone())
         path=Path(path)
-        if not 0<path.stat().st_size<=MAX_UPLOAD:raise Problem('素材文件需在100MB以内')
-        with path.open('rb') as f:magic=f.read(16)
-        video=magic[4:8]==b'ftyp' or magic[:4]==b'\x1aE\xdf\xa3'
-        if video:
-            info=probe_video(path);kind='video';ext='webm' if magic[:4]==b'\x1aE\xdf\xa3' else 'mp4'
-        else:
-            info=image_info(path);kind='image';ext={'PNG':'png','JPEG':'jpg','WEBP':'webp'}[info['format']]
-        aid=ident();dest=self.root/(aid+'.'+ext);shutil.copyfile(path,dest)
-        preview=self.root/(aid+'-preview.jpg')
+        staged=None;dest=None;preview=None
         try:
+            # Read once into an owned snapshot, then validate, hash, and render
+            # from that exact byte sequence. Reopening a mutable supplier file
+            # after inspection could attach different pixels than were checked.
+            with path.open('rb') as source:
+                before=os.fstat(source.fileno())
+                if not 0<before.st_size<=MAX_UPLOAD:raise Problem('素材文件需在100MB以内')
+                with tempfile.NamedTemporaryFile(dir=self.root,prefix='.ingest-',suffix='.upload',delete=False) as target:
+                    staged=Path(target.name);copied=0
+                    while copied<=MAX_UPLOAD:
+                        chunk=source.read(min(1024*1024,MAX_UPLOAD+1-copied))
+                        if not chunk:break
+                        target.write(chunk);copied+=len(chunk)
+                    if copied>MAX_UPLOAD:raise Problem('素材文件需在100MB以内')
+                    target.flush();os.fsync(target.fileno())
+                after=os.fstat(source.fileno())
+                if copied!=before.st_size or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+                    raise Problem('素材文件在读取时发生变化，请重新选择')
+            with staged.open('rb') as f:magic=f.read(16)
+            video=magic[4:8]==b'ftyp' or magic[:4]==b'\x1aE\xdf\xa3'
+            if video:
+                info=probe_video(staged);kind='video';ext='webm' if magic[:4]==b'\x1aE\xdf\xa3' else 'mp4'
+            else:
+                info=image_info(staged);kind='image';ext={'PNG':'png','JPEG':'jpg','WEBP':'webp'}[info['format']]
+            aid=ident();dest=self.root/(aid+'.'+ext);os.replace(staged,dest);staged=None
+            preview=self.root/(aid+'-preview.jpg')
             if video:self.command(['-ss','0','-i',str(dest),'-frames:v','1','-vf','scale=480:480:force_original_aspect_ratio=decrease','-y',str(preview)],timeout=30)
             else:jpeg(fit(rgb_image(dest),(480,480)),preview)
             asset={'id':aid,'kind':kind,'name':name,'file':dest.name,'preview':preview.name,'rights':rights,'product_id':product_id,'parents':[],'task_id':None,'created_at':now(),'bytes':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),**info}
@@ -243,7 +289,12 @@ class Media:
                 with self.store.connect() as c:register(c)
             else:register(connection)
             return asset
-        except Exception:dest.unlink(missing_ok=True);preview.unlink(missing_ok=True);raise
+        except Exception:
+            if dest:dest.unlink(missing_ok=True)
+            if preview:preview.unlink(missing_ok=True)
+            raise
+        finally:
+            if staged:staged.unlink(missing_ok=True)
     def recipe(self,b,connection=None):
         kind=b.get('kind')
         if kind not in RECIPES:raise Problem('处理类型不存在')

@@ -64,6 +64,11 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaises(Problem):self.call('purchase',supplier_id=self.supplier,warehouse_id=self.warehouse,lines=[self.lines()[0]]*2)
         for amount in ['NaN','Infinity','-1','0.001',True]:
             with self.assertRaises(Problem):self.call('purchase',supplier_id=self.supplier,warehouse_id=self.warehouse,lines=[{**self.lines()[0],'unit_price':amount}])
+    def test_unencodable_unicode_is_rejected_before_request_fingerprint(self):
+        before=self.ops.state()['entities']
+        with self.assertRaises(Problem):
+            self.ops.transact('entity',{'request_id':'bad-unicode','kind':'supplier','name':'供应商\ud800'})
+        self.assertEqual(self.ops.state()['entities'],before)
     def test_order_identity_is_shop_scoped(self):
         b=dict(shop_id=self.shop,warehouse_id=self.warehouse,external_id='1',currency='SAR',lines=self.lines())
         self.call('order',**b)

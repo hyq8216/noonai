@@ -41,6 +41,13 @@ class VisualBatchTests(unittest.TestCase):
  def test_existing_candidate_kept_and_missing_shot_only_queued(self):
   p=self.product();out=self.batch.apply(self.prepared(self.body([p])));self.app.visuals.update(out['job_ids'][0],'candidate','Synthetic candidate state')
   b=self.body([p],shots=['hero','scene']);pre=self.batch.preview(b);self.assertEqual(pre['rows'][0]['kept'][0]['shot'],'hero');self.assertEqual(pre['plans'][p['id']]['shots'],['scene']);out=self.batch.apply({**b,'preview_token':pre['token']});self.assertEqual(len(out['job_ids']),1)
+ def test_reversed_shot_input_previews_and_queues_in_canonical_order(self):
+  p=self.product();body=self.body([p],shots=['detail','hero','model','scene'],shot_briefs={'detail':'Macro only','hero':'Pure white','model':'Fictional adult','scene':'Kitchen'})
+  preview=self.batch.preview(body);self.assertEqual(preview['plans'][p['id']]['shots'],['hero','scene','model','detail'])
+  request={**body,'preview_token':preview['token']};out=self.batch.apply(request);recipes=[self.app.visuals.get(jid)['recipe'] for jid in out['job_ids']]
+  self.assertEqual([recipe['shot'] for recipe in recipes],['hero','scene','model','detail'])
+  self.assertEqual([recipe['shot_brief'] for recipe in recipes],['Pure white','Kitchen','Fictional adult','Macro only'])
+  self.assertEqual(self.batch.apply(request),out)
  def test_uncertain_task_never_auto_repeated(self):
   p=self.product();out=self.batch.apply(self.prepared(self.body([p])));self.app.visuals.update(out['job_ids'][0],'uncertain','unknown',dispatched_at=now());b=self.body([p]);self.assertEqual(self.batch.preview(b)['rows'][0]['status'],'blocked')
  def test_output_rejected_blocks_bulk_until_explicitly_discarded(self):

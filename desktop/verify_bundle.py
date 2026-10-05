@@ -1,5 +1,6 @@
 """Exercise the shipped backend without a developer Python on its PATH."""
 import json
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -7,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.request import urlopen,Request
+from urllib.error import HTTPError
 
 ROOT=Path(__file__).resolve().parent
 BIN=Path(os.environ.get('NOON_VERIFY_APP',str(ROOT/'dist/Noon Studio.app')))/'Contents/Resources/backend/noon-backend'
@@ -29,10 +31,49 @@ def start(root,tag):
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp);p,url=start(root,'first')
     try:
-        s=request(url,'/api/state');token=s['token']
+        # /api/state intentionally returns only the selected surface's data.
+        s=request(url,'/api/state?surface=overview');token=s['token']
         def call(action,**data):return request(url,'/api/ops/'+action,token,{'request_id':uuid.uuid4().hex,**data})
         assert s['products']==[] and s['ops']['documents']==[]
-        pid=request(url,'/api/import',token,{'products':[{'title_zh':'Packaged QA item'}]})['created'][0]
+        try:
+            request(url,'/api/import',token,{'products':[{'title_zh':'Credential rejection QA',
+                'source_url':'https://:synthetic-secret@example.com/product/1'}]})
+        except HTTPError as exc:
+            assert exc.code==400
+        else:raise AssertionError('Supplier source URL embedded credentials were accepted')
+        assert request(url,'/api/state?surface=overview')['products']==[]
+        qa_product={'title_zh':'Packaged QA item','source_url':'https://detail.1688.com/offer/12345.html?spm=first','source_sku':'QA-1'}
+        pid=request(url,'/api/import',token,{'products':[qa_product]})['created'][0]
+        duplicate=request(url,'/api/import',token,{'products':[{'title_zh':'Tracking duplicate',
+            'source_url':'http://m.1688.com/offer/12345.html?spm=second','source_sku':'QA-1'}]})
+        assert duplicate['created']==[] and duplicate['duplicates']==[pid]
+        distinct=request(url,'/api/import',token,{'products':[
+            {'title_zh':'Composite identity A','source_url':'https://supplier.example/a|b','source_sku':'c'},
+            {'title_zh':'Composite identity B','source_url':'https://supplier.example/a','source_sku':'b|c'},
+        ]})
+        assert len(distinct['created'])==2 and distinct['duplicates']==[], 'packed source identity keys collided'
+        campaign_product=request(url,'/api/import',token,{'products':[{'title_zh':'Packaged campaign route QA',
+            'source_url':'https://supplier.example/campaign-route-qa','source_sku':'CAMPAIGN-QA-1',
+            'supplier':'Synthetic QA supplier','facts':'Synthetic red plastic box'}]})['created'][0]
+        profiles=[]
+        for name,model in [('QA primary one','synthetic-one'),('QA primary two','synthetic-two'),('QA review','synthetic-review')]:
+            profile=request(url,'/api/models/save',token,{'name':name,'provider':'custom',
+                'base_url':'https://model.example/v1','model':model,'enabled':True,'api_key':'synthetic-no-network-key',
+                'daily_calls':50,'rpm':10,'max_output_tokens':4000,'input_price':'1','output_price':'1','daily_usd':'1'})
+            profiles.append(profile['id'])
+        request(url,'/api/models/route',token,{'role':'primary','profile_id':profiles[0]})
+        request(url,'/api/models/route',token,{'role':'review','profile_id':profiles[2]})
+        campaign={'product_ids':[campaign_product],'plan':{'translate':True,'review':True}}
+        campaign_preview=request(url,'/api/catalog-campaign/preview',token,campaign)
+        assert campaign_preview['totals']['ready']==1 and campaign_preview['totals']['calls']==2
+        request(url,'/api/models/route',token,{'role':'primary','profile_id':profiles[1]})
+        try:
+            request(url,'/api/catalog-campaign/apply',token,{**campaign,'name':'Packaged stale route QA',
+                'request_id':'packaged-stale-route','confirmed':True,'preview_token':campaign_preview['token']})
+        except HTTPError as exc:
+            assert exc.code==409
+        else:raise AssertionError('Packaged catalog campaign accepted a stale model-route preview')
+        assert request(url,'/api/catalog-campaign/history?page=0',token)['total']==0
         entities={k:call('entity',kind=k,name='QA-'+k)['id'] for k in ['shop','warehouse','supplier']}
         lines=[{'product_id':pid,'quantity':3,'unit_price':'1.25'}]
         purchase=call('purchase',supplier_id=entities['supplier'],warehouse_id=entities['warehouse'],lines=lines)
@@ -42,7 +83,7 @@ with tempfile.TemporaryDirectory() as tmp:
         call('ship',id=order['id'],revision=order['revision'],carrier='QA',tracking='QA-TRACK')
         fin=request(url,'/api/finance/entry',token,{'request_id':'packaged-finance','kind':'income','category':'sale','document_id':order['id'],'currency':'SAR','amount':'2.50','fx':'1.9','date':'2026-01-01','evidence_key':'QA-STATEMENT-1','evidence':'Synthetic QA settlement'})
         request(url,'/api/finance/payment',token,{'request_id':'packaged-receipt','id':fin['id'],'revision':fin['revision'],'amount':'1.00','fx':'1.91','date':'2026-01-02','account':'QA account','evidence_key':'QA-RECEIPT-1','evidence':'Synthetic QA receipt'})
-        finance_snapshot=request(url,'/api/state')['finance']
+        finance_snapshot=request(url,'/api/state?surface=finance')['finance']
         assert finance_snapshot['entries'][0]['remaining_cents']==150
         assert finance_snapshot['summary']['income_cents']==475 and finance_snapshot['summary']['cash_in_cents']==191
         dest=call('entity',kind='warehouse',name='QA-destination')['id']
@@ -50,58 +91,65 @@ with tempfile.TemporaryDirectory() as tmp:
         tr=call('transfer_dispatch',id=tr['id'],revision=tr['revision'],evidence='Synthetic dispatch')
         call('transfer_receive',id=tr['id'],revision=tr['revision'],quantities={pid:1},evidence='Synthetic receipt')
         call('replenishment_policy',product_id=pid,warehouse_id=dest,supplier_id=entities['supplier'],minimum=2,target=5,min_order=1,pack_size=1,unit_price='1.25',quote_evidence='QA quotation',enabled=True,revision=0)
-        planned=request(url,'/api/state')['ops']['replenishment'][0]
+        planned=request(url,'/api/state?surface=warehouse')['ops']['replenishment'][0]
         assert planned['quantity']==4
         call('replenish',confirmed=True,rows=[{k:planned[k] for k in ('product_id','warehouse_id','fingerprint')}])
-        snapshot=request(url,'/api/state')['ops'];assert sum(s['on_hand'] for s in snapshot['stock'])==1 and all(s['reserved']==0 for s in snapshot['stock']) and snapshot['replenishment'][0]['quantity']==0
+        snapshot=request(url,'/api/state?surface=warehouse')['ops']
+        inventory_snapshot=request(url,'/api/state?surface=inventory')['ops']['stock']
+        assert sum(s['on_hand'] for s in inventory_snapshot)==1 and all(s['reserved']==0 for s in inventory_snapshot) and snapshot['replenishment'][0]['quantity']==0
         other=subprocess.run([str(BIN),'--port','0','--data',str(root),'--ready-file',str(root/'second.json')],capture_output=True,timeout=10)
         assert other.returncode!=0 and '另一个实例'.encode() in other.stderr
     finally:p.terminate();p.wait(timeout=10)
     p,url=start(root,'reopened')
     try:
-        assert request(url,'/api/state')['finance']==finance_snapshot
-        current=request(url,'/api/state')['ops'];assert current==snapshot
+        assert request(url,'/api/state?surface=finance')['finance']==finance_snapshot
+        current=request(url,'/api/state?surface=warehouse')['ops'];assert current==snapshot
         token=request(url,'/api/state')['token'];assets=[]
         for name in ['red','blue']:
             raw=(ROOT/'qa/media-fixtures'/(name+'.png')).read_bytes()
             req=Request(url+'/api/media/upload',raw,{'Content-Type':'application/octet-stream','X-Workbench-Token':token,'X-Media-Name':name+'.png','X-Media-Rights':'Synthetic QA fixture'})
-            with urlopen(req,timeout=10) as r:assets.append(json.load(r)['id'])
+            with urlopen(req,timeout=10) as r:asset_id=json.load(r)['id']
+            asset=request(url,'/api/media/asset?id='+asset_id)
+            assert (asset['width'],asset['height'])==(1200,1000)
+            assert asset['sha256']==hashlib.sha256(raw).hexdigest()
+            assets.append(asset_id)
         # Pause before creation: the packaged check must never call the real subscription.
         request(url,'/api/visuals/control',token,{'action':'pause'})
-        visual_req={'request_id':'packaged-visual','product_id':pid,'revision':request(url,'/api/state')['products'][0]['revision'],'asset_ids':[assets[0]],'shots':['hero'],'confirmed':True,'locked_features':'Synthetic QA geometry','style':'Synthetic test only'}
+        visual_req={'request_id':'packaged-visual','product_id':pid,'revision':request(url,'/api/state')['products'][0]['revision'],'asset_ids':[assets[0]],'shots':['hero'],'confirmed':True,'confirmed_unassigned':True,'locked_features':'Synthetic QA geometry','style':'Synthetic test only'}
         visual_job=request(url,'/api/visuals/tasks',token,visual_req)['job_ids'][0]
         assert request(url,'/api/visuals/tasks',token,visual_req)['job_ids']==[visual_job]
-        visual_state=request(url,'/api/state')['visuals']
-        assert visual_state['jobs'][0]['status']=='queued' and visual_state['jobs'][0]['dispatched_at'] is None
+        visual_state=request(url,'/api/visuals/list?page=0&group=all')['jobs']
+        queued=next(j for j in visual_state if j['id']==visual_job)
+        assert queued['status']=='queued' and queued['dispatched_at'] is None
         request(url,'/api/visuals/control',token,{'action':'cancel','id':visual_job})
         with urlopen(url+'/visuals.js') as r:assert b'visualPage' in r.read()
         task=request(url,'/api/media/tasks',token,{'request_id':'packaged-media','recipes':[{'kind':'slideshow','asset_ids':assets,'seconds':1}]})['task_ids'][0]
         for _ in range(200):
-            media=request(url,'/api/state')['media'];t=next(t for t in media['tasks'] if t['id']==task)
+            media=request(url,'/api/media/task-list?page=0&group=all');t=next(t for t in media['tasks'] if t['id']==task)
             if t['status'] in ['done','failed']:break
             time.sleep(.1)
         assert t['status']=='done',t
-        video=next(a for a in media['assets'] if a['id']==t['result'][0]);assert (video['width'],video['height'])==(1080,1080) and abs(video['duration']-2)<.1
+        video=request(url,'/api/media/asset?id='+t['result'][0]);assert (video['width'],video['height'])==(1080,1080) and abs(video['duration']-2)<.1
         with urlopen(Request(url+'/media/'+video['file'],headers={'Range':'bytes=0-31'})) as r:assert r.status==206 and len(r.read())==32
         media_snapshot=media
     finally:p.terminate();p.wait(timeout=10)
     p,url=start(root,'media-reopened')
     try:
-        assert request(url,'/api/state')['media']==media_snapshot
+        assert request(url,'/api/media/task-list?page=0&group=all')==media_snapshot
         token=request(url,'/api/state')['token']
         interrupted=request(url,'/api/media/tasks',token,{'request_id':'interrupt-media','recipes':[{'kind':'slideshow','asset_ids':assets,'seconds':10,'aspect':'portrait'}]})['task_ids'][0]
         for _ in range(100):
-            t=next(t for t in request(url,'/api/state')['media']['tasks'] if t['id']==interrupted)
+            t=next(t for t in request(url,'/api/media/task-list?page=0&group=all')['tasks'] if t['id']==interrupted)
             if t['status']=='running':break
             time.sleep(.01)
         assert t['status']=='running',t
     finally:p.terminate();p.wait(timeout=10)
     p,url=start(root,'interrupted-reopened')
     try:
-        t=next(t for t in request(url,'/api/state')['media']['tasks'] if t['id']==interrupted)
+        t=next(t for t in request(url,'/api/media/task-list?page=0&group=all')['tasks'] if t['id']==interrupted)
         assert t['status']=='interrupted',t
         assert not list((root/'media/work').iterdir())
-        before=request(url,'/api/state');token=before['token']
+        before=request(url,'/api/state?surface=overview');token=before['token']
         backup=request(url,'/api/backup/create',token,{})
         with urlopen(url+'/api/backup/download/'+backup['id']) as r:archive=r.read()
         request(url,'/api/import',token,{'products':[{'title_zh':'Must disappear after restore'}]})
@@ -110,17 +158,17 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:p.terminate();p.wait(timeout=10)
     p,url=start(root,'backup-restored')
     try:
-        after=request(url,'/api/state')
-        assert [x['id'] for x in after['products']]==[pid]
+        after=request(url,'/api/state?surface=overview')
+        assert {x['id'] for x in after['products']}=={pid,*distinct['created'],campaign_product}
         assert after['ops']==before['ops'] and after['finance']==before['finance']
-        assert after['media']['assets']==before['media']['assets']
+        assert request(url,'/api/media/asset?id='+video['id'])['sha256']==video['sha256']
         assert after['media']['paused'] and after['visuals']['paused']
         assert after['recovery']['last_restore']['status']=='restored'
         rollback=after['recovery']['last_restore']['rollback_archive_id']
         with urlopen(url+'/api/backup/download/'+rollback) as r:assert r.read(2)==b'PK'
         with urlopen(Request(url+'/media/'+video['file'],headers={'Range':'bytes=0-31'})) as r:assert r.status==206 and len(r.read())==32
     finally:p.terminate();p.wait(timeout=10)
-report={'standalone_runtime':True,'backup_restore_and_rollback_download':True,'transfer_and_replenishment_roundtrip':True,'finance_partial_receipt_and_persistence':True,'visual_routes_and_dedupe':True,'visual_provider_called':False,'operations_roundtrip':True,'on_hand_after_3_received_2_shipped':1,'second_instance_blocked':True,'reopen_persistence':True,'packaged_ffmpeg_slideshow':{'width':1080,'height':1080,'duration':video['duration']},'media_range_read':True,'media_reopen_persistence':True,'shutdown_during_processing':'interrupted; temporary work removed'}
+report={'standalone_runtime':True,'backup_restore_and_rollback_download':True,'transfer_and_replenishment_roundtrip':True,'finance_partial_receipt_and_persistence':True,'visual_routes_and_dedupe':True,'catalog_route_change_invalidates_preview':True,'visual_provider_called':False,'operations_roundtrip':True,'on_hand_after_3_received_2_shipped':1,'second_instance_blocked':True,'reopen_persistence':True,'packaged_ffmpeg_slideshow':{'width':1080,'height':1080,'duration':video['duration']},'media_range_read':True,'media_reopen_persistence':True,'shutdown_during_processing':'interrupted; temporary work removed'}
 (ROOT/'qa').mkdir(exist_ok=True)
 (ROOT/'qa/bundle-verification.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report))

@@ -13,9 +13,11 @@ from urllib.request import Request,urlopen
 from urllib.error import HTTPError
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from PIL import Image
-from core import Store,Problem,now,normalize_image,economics,payload
+from core import Store,Problem,now,normalize_image,economics,payload,normalize_source_url
 from server import App,Handler,ThreadingHTTPServer,export_package
 from connectors import preflight_attributes,translate
+from source_import import SourceImport
+from source_updates import SourceUpdates
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -33,6 +35,73 @@ class WorkflowTests(unittest.TestCase):
         p=self.make(); result=self.store.import_rows([{'title_zh':'重复','source_url':'https://detail.1688.com/offer/123.html?tracking=other','source_sku':'BLACK-5'}])
         self.assertEqual(result['duplicates'],[p['id']]); self.assertEqual(len(self.store.list()),1)
         result=self.store.import_rows([{'title_zh':'不同规格','source_url':p['source_url'],'source_sku':'WHITE-5'}]); self.assertEqual(len(result['created']),1)
+    def test_source_identity_key_does_not_alias_pipe_characters_and_reads_legacy_key(self):
+        rows=[
+            {'title_zh':'链接甲','source_url':'https://supplier.example/a|b','source_sku':'c','supplier':'工厂','facts':'红色盒'},
+            {'title_zh':'链接乙','source_url':'https://supplier.example/a','source_sku':'b|c','supplier':'工厂','facts':'蓝色盒'},
+        ]
+        result=self.store.import_rows(rows)
+        self.assertEqual(len(result['created']),2)
+        with self.store.connect() as c:self.assertEqual(c.execute('SELECT count(DISTINCT source_key) FROM products').fetchone()[0],2)
+        # Existing databases contain delimiter-joined identities. They remain matchable.
+        legacy=self.make(source_url='https://supplier.example/legacy|path',source_sku='legacy-sku')
+        with self.store.connect() as c:
+            c.execute('UPDATE products SET source_key=? WHERE id=?',(legacy['source_url']+'|'+legacy['source_sku'],legacy['id']))
+        replay=self.store.import_rows([{'title_zh':'旧商品重复','source_url':legacy['source_url'],'source_sku':legacy['source_sku']}])
+        self.assertEqual(replay['duplicates'],[legacy['id']])
+    def test_source_import_and_update_keep_pipe_delimited_identities_separate(self):
+        with self.store.connect() as c:
+            c.execute('CREATE TABLE IF NOT EXISTS ops_requests(key TEXT PRIMARY KEY,digest TEXT NOT NULL,result TEXT NOT NULL)')
+        rows=[
+            {'title_zh':'链接甲','source_url':'https://supplier.example/a|b','source_sku':'c','supplier':'工厂','facts':'红色盒'},
+            {'title_zh':'链接乙','source_url':'https://supplier.example/a','source_sku':'b|c','supplier':'工厂','facts':'蓝色盒'},
+        ]
+        importer=SourceImport(self.store);preview=importer.preview({'products':rows})
+        self.assertEqual([row['status'] for row in preview['rows']],['ready','ready'])
+        result=importer.apply({'products':rows,'preview_token':preview['token'],'confirmed':True})
+        self.assertEqual(len(result['created']),2)
+        updates=SourceUpdates(self.store);body={'products':[
+            {'source_url':rows[0]['source_url'],'source_sku':rows[0]['source_sku'],'stock':2},
+            {'source_url':rows[1]['source_url'],'source_sku':rows[1]['source_sku'],'stock':7},
+        ]}
+        update_preview=updates.preview(body)
+        self.assertEqual([row['status'] for row in update_preview['rows']],['ready','ready'])
+        updates.apply({**body,'preview_token':update_preview['token'],'confirmed':True})
+        products=[self.store.get(pid) for pid in result['created']]
+        self.assertEqual({(p['source_url'],p['source_sku']):p['stock'] for p in products},
+                         {(rows[0]['source_url'],rows[0]['source_sku']):2,(rows[1]['source_url'],rows[1]['source_sku']):7})
+        legacy=self.make(source_url='https://supplier.example/legacy|path',source_sku='legacy-sku',stock=3)
+        with self.store.connect() as c:
+            c.execute('UPDATE products SET source_key=? WHERE id=?',(legacy['source_url']+'|'+legacy['source_sku'],legacy['id']))
+        old_file={'products':[{'title_zh':legacy['title_zh'],'source_url':legacy['source_url'],'source_sku':legacy['source_sku'],
+                               'supplier':legacy['supplier'],'facts':legacy['facts']}]}
+        old_preview=importer.preview(old_file)
+        self.assertEqual(old_preview['rows'][0]['status'],'duplicate')
+        self.assertEqual(old_preview['rows'][0]['existing_id'],legacy['id'])
+        old_update={'products':[{'source_url':legacy['source_url'],'source_sku':legacy['source_sku'],'stock':9}]}
+        old_update_preview=updates.preview(old_update)
+        self.assertEqual(old_update_preview['rows'][0]['status'],'ready')
+        updates.apply({**old_update,'preview_token':old_update_preview['token'],'confirmed':True})
+        self.assertEqual(self.store.get(legacy['id'])['stock'],9)
+    def test_source_url_normalization_and_credential_rejection(self):
+        self.assertEqual(normalize_source_url('http://m.1688.com/offer/123.html?spm=share#detail'),
+                         'https://detail.1688.com/offer/123.html')
+        self.assertEqual(normalize_source_url('https://shop.example/product?id=red#gallery'),
+                         'https://shop.example/product?id=red')
+        for url in (
+            'https://seller:secret@example.com/product/1',
+            'https://:secret@example.com/product/1',
+            'https://:@example.com/product/1',
+        ):
+            with self.subTest(url=url), self.assertRaises(Problem):
+                self.store.import_rows([{'title_zh':'凭据不得入库','source_url':url}])
+        self.assertEqual(self.store.list(),[])
+        product=self.make()
+        with self.assertRaises(Problem):
+            self.store.update(product['id'],{'source_url':'https://:synthetic-password@example.org/product/1'},product['revision'])
+        saved=self.store.get(product['id'])
+        self.assertEqual(saved['revision'],product['revision'])
+        self.assertEqual(saved['source_url'],product['source_url'])
     def test_atomic_invalid_batch(self):
         with self.assertRaises(Problem): self.store.import_rows([{'title_zh':'有效'},{'title_zh':'无效','stock':-1}])
         self.assertEqual(self.store.list(),[])
@@ -65,7 +134,17 @@ class WorkflowTests(unittest.TestCase):
     def test_persistence_restart_jobs(self):
         p=self.make(); jid=self.store.add_job(p['id'],'translate',p['revision'])
         other=Store(self.tmp.name); other.recover_jobs()
-        self.assertEqual(other.get(p['id'])['source_sku'],'BLACK-5'); self.assertEqual(other.history()['jobs'][0]['status'],'interrupted')
+        self.assertEqual(other.get(p['id'])['source_sku'],'BLACK-5')
+        queued=other.history()['jobs'][0]
+        self.assertEqual((queued['id'],queued['status']),(jid,'failed'))
+        self.assertIn('尚未开始外部调用',queued['message'])
+        # Once a worker atomically claims a job, restart cannot know whether an
+        # external request left the process, so it must require reconciliation.
+        running=other.add_job(p['id'],'translate',p['revision'])
+        with other.connect() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(running,))
+        other.recover_jobs();result=other.history()['jobs'][0]
+        self.assertEqual((result['id'],result['status']),(running,'interrupted'))
+        self.assertIn('结果可能不确定',result['message'])
     def test_one_job_per_product(self):
         p=self.make(); self.store.add_job(p['id'],'translate',p['revision'])
         with self.assertRaises(Problem): self.store.add_job(p['id'],'translate',p['revision'])
@@ -99,7 +178,9 @@ class WorkflowTests(unittest.TestCase):
         q=self.store.update(p['id'],{'image_urls':{'a':'https://example.com/new.jpg'}},p['revision'])
         self.assertEqual(q['images'][0]['public_url'],'https://example.com/new.jpg')
         self.assertFalse(q['images_verified'])
-        with self.assertRaises(Problem): self.store.update(q['id'],{'image_urls':{'a':'javascript:bad'}},q['revision'])
+        for url in ('javascript:bad','https://:synthetic-password@images.example/item.jpg','https://[malformed/item.jpg'):
+            with self.subTest(url=url), self.assertRaises(Problem):
+                self.store.update(q['id'],{'image_urls':{'a':url}},q['revision'])
         self.assertEqual(self.store.get(p['id'])['images'][0]['public_url'],'https://example.com/new.jpg')
     def test_source_snapshot_and_versions(self):
         p=self.make(); q=self.store.update(p['id'],{'facts':'更新事实'},p['revision'])
@@ -131,7 +212,7 @@ class WorkflowTests(unittest.TestCase):
         app=App(self.tmp.name); p=self.complete(); p=self.store.approve(p['id'],p['revision'])
         jid=self.store.add_job(p['id'],'submit',p['revision'])
         contract={'attributes':[{'attribute_code':k,'is_mandatory':True,'is_localizable':True,'attribute_type':'ATTRIBUTE_TYPE_TEXT'} for k in ['product_title','long_description']]}
-        with patch('server.Noon') as client:
+        with patch.object(app,'config',return_value={'noon_ready':True,'submit_enabled':True}),patch('server.Noon') as client:
             client.return_value.attributes.return_value=contract
             client.return_value.submit.return_value={'sku_parent':'TEST-PARENT','status':{'status_id':3,'message':'invalid'}}
             app.run(jid,p,'submit')
@@ -159,11 +240,99 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(cm.exception.code,403)
         with self.assertRaises(HTTPError) as cm: self.call('/api/import',{}, {'X-Workbench-Token':self.app.token,'Origin':'https://evil.example'})
         self.assertEqual(cm.exception.code,403)
+    def test_supplier_import_rejects_unencodable_unicode_as_client_error(self):
+        initial=len(self.app.store.list())
+        headers={'X-Workbench-Token':self.app.token}
+        for body in ({'csv':'商品名称\n\ud800'},{'products':[{'title_zh':'\ud800'}]}):
+            with self.assertRaises(HTTPError) as failed:self.call('/api/import/preview',body,headers)
+            self.assertEqual(failed.exception.code,400)
+        self.assertEqual(len(self.app.store.list()),initial)
+    def test_source_lead_preview_rejects_unencodable_unicode_as_client_error(self):
+        headers={'X-Workbench-Token':self.app.token}
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/source-leads/preview',{'links':'https://supplier.example/item/1\n\ud800'},headers)
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.source_leads.list()['total'],0)
+    def test_source_lead_add_rejects_unencodable_unicode_before_fingerprinting(self):
+        headers={'X-Workbench-Token':self.app.token}
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/source-leads/add',{'request_id':'bad-unicode','confirmed':True,
+                      'preview_token':'stale','links':'https://supplier.example/item/1\n\ud800'},headers)
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.source_leads.list()['total'],0)
+    def test_operations_rejects_unencodable_unicode_before_fingerprinting(self):
+        before=self.app.ops.state()['entities']
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/ops/entity',{'request_id':'bad-unicode','kind':'supplier','name':'供应商\ud800'},
+                      {'X-Workbench-Token':self.app.token})
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.ops.state()['entities'],before)
+    def test_platform_batch_preview_rejects_unencodable_product_id(self):
+        headers={'X-Workbench-Token':self.app.token}
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/platform-batch/preview',{'kind':'offers','product_ids':['bad-\ud800']},headers)
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.store.history()['jobs'],[])
+    def test_finance_rejects_unencodable_request_before_entry_or_receipt(self):
+        before=self.app.finance.state()
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/finance/entry',{'request_id':'bad-\ud800','kind':'income'},
+                      {'X-Workbench-Token':self.app.token})
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.finance.state()['entries'],before['entries'])
+        with self.app.store.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM finance_requests').fetchone()[0],0)
+    def test_visual_generation_rejects_unencodable_product_before_task_creation(self):
+        headers={'X-Workbench-Token':self.app.token}
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/visuals/tasks',{'request_id':'valid-request','product_id':'bad-\ud800','revision':1,
+                      'asset_ids':['synthetic-asset'],'shots':['hero'],'confirmed':True},headers)
+        self.assertEqual(failed.exception.code,400)
+        with self.app.store.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM visual_jobs').fetchone()[0],0)
+    def test_catalog_campaign_preview_rejects_unencodable_product_before_query(self):
+        headers={'X-Workbench-Token':self.app.token}
+        with self.assertRaises(HTTPError) as failed:
+            self.call('/api/catalog-campaign/preview',{'product_ids':['bad-\ud800'],'plan':{'translate':False}},headers)
+        self.assertEqual(failed.exception.code,400)
+        self.assertEqual(self.app.automation.state()['runs'],[])
+    def test_direct_product_import_rejects_unencodable_unicode_before_database_write(self):
+        before=len(self.app.store.list())
+        headers={'X-Workbench-Token':self.app.token}
+        for product in ({'title_zh':'名称\ud800'},
+                        {'title_zh':'合法名称','attribute_values':{'Material':{'value':'Steel\ud800'}}}):
+            with self.assertRaises(HTTPError) as failed:
+                self.call('/api/import',{'products':[product]},headers)
+            self.assertEqual(failed.exception.code,400)
+        self.assertEqual(len(self.app.store.list()),before)
     def test_state_and_persistence(self):
         data=json.loads(self.call('/api/state').read()); self.assertNotIn('TEXT_API_KEY',json.dumps(data))
         r=json.loads(self.call('/api/import',{'products':[{'title_zh':'HTTP商品'}]},{'X-Workbench-Token':self.app.token}).read())
         self.assertEqual(len(r['created']),1)
         self.assertTrue(any(p['title_zh']=='HTTP商品' for p in json.loads(self.call('/api/state').read())['products']))
+    def test_public_image_url_endpoint_rejects_embedded_credentials(self):
+        pid=self.app.store.import_rows([{'title_zh':'HTTP成图凭据测试'}])['created'][0]
+        product=self.app.store.get(pid)
+        product=self.app.store.update(pid,{},product['revision'],{'images':[{
+            'id':'synthetic-image','source':'local.png','file':'synthetic.jpg',
+            'public_url':'https://images.example/original.jpg'}]})
+        for url in ('https://:synthetic-password@images.example/item.jpg','https://[malformed/item.jpg'):
+            with self.subTest(url=url), self.assertRaises(HTTPError) as failed:
+                self.call(f'/api/products/{pid}/images',{
+                    'revision':product['revision'],'image_id':'synthetic-image','public_url':url},
+                    {'X-Workbench-Token':self.app.token})
+            self.assertEqual(failed.exception.code,400)
+            saved=self.app.store.get(pid)
+            self.assertEqual(saved['revision'],product['revision'])
+            self.assertEqual(saved['images'][0]['public_url'],'https://images.example/original.jpg')
+    def test_health_and_readiness_probes_are_small_and_database_aware(self):
+        health=json.loads(self.call('/healthz').read())
+        self.assertEqual(health,{'status':'ok','service':'noon-studio'})
+        ready=json.loads(self.call('/readyz').read())
+        self.assertEqual(ready,{'status':'ready','checks':{'database':'ok'}})
+        self.assertNotIn(self.app.token,json.dumps(health)+json.dumps(ready))
+        with patch.object(self.app.store,'connect',side_effect=OSError('private database path')):
+            with self.assertRaises(HTTPError) as failed:self.call('/readyz')
+            self.assertEqual(failed.exception.code,503)
+            self.assertEqual(json.loads(failed.exception.read()),{'status':'not_ready','checks':{'database':'error'}})
     def test_traversal_and_unknown_host(self):
         with self.assertRaises(HTTPError): self.call('/assets/../../.env')
         with self.assertRaises(HTTPError) as cm: self.call('/api/state',headers={'Host':'evil.example'})

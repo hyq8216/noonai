@@ -136,7 +136,7 @@ class ImageHost:
         import boto3
         from botocore.config import Config
         return boto3.client('s3',endpoint_url=c['endpoint'],region_name=c['region'],aws_access_key_id=c['access_key'],aws_secret_access_key=c['secret_key'],config=Config(signature_version='s3v4',s3={'addressing_style':c['addressing_style']},connect_timeout=15,read_timeout=30,retries={'total_max_attempts':1},request_checksum_calculation='when_required',response_checksum_validation='when_required'))
-    def publish(self,p):
+    def publish(self,p,job_id=None):
         c=self.config()
         if not c or c['revision']!=p.get('_host_config'):raise Problem('托管配置已变化，尚未上传',409)
         current=self.store.get(p['id'])
@@ -156,5 +156,20 @@ class ImageHost:
             urls[im['id']]=url;receipts.append({'image_id':im['id'],'key':key,'sha256':h,'public_url':url,'checked_at':now()})
         # Optimistic version check prevents a slow external request overwriting edits.
         if [h for _,_,h in self.validated_files({**self.store.get(p['id']),'_host_visual_outputs':p.get('_host_visual_outputs',[])})]!=p['_host_hashes']:raise Problem('上传期间本地图片已变化，公开地址未回填',409)
-        updated=self.store.update(p['id'],{'image_urls':urls},p['revision'])
-        return {'revision':updated['revision'],'images':receipts,'notice':'仅证明本次匿名读取内容一致；不代表noon已读取或商品可售'}
+        result={'revision':None,'images':receipts,'notice':'仅证明本次匿名读取内容一致；不代表noon已读取或商品可售'}
+        if job_id is None:
+            updated=self.store.update(p['id'],{'image_urls':urls},p['revision'])
+            result['revision']=updated['revision']
+            return result
+        # Public uploads are external and deterministic; commit their local readback
+        # and the durable job receipt together so a crash cannot split the two states.
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            job=db.execute("SELECT status,kind,product_id FROM jobs WHERE id=?",(job_id,)).fetchone()
+            if not job or (job['status'],job['kind'],job['product_id'])!=('running','image-host',p['id']):
+                raise Problem('图片托管任务状态已变化，公开结果待核对',409)
+            updated=self.store.update(p['id'],{'image_urls':urls},p['revision'],connection=db)
+            result['revision']=updated['revision']
+            db.execute("UPDATE jobs SET status='done',message='图片已上传并通过公网内容核对，请重新审核',result=?,updated_at=? WHERE id=? AND status='running'",
+                       (json.dumps(result,ensure_ascii=False),now(),job_id))
+        return result

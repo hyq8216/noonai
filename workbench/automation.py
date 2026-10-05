@@ -8,16 +8,22 @@ import json
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from core import Problem, ident, now
 from media import RECIPES
 from models import text, CONTENT_FIELDS, ModelLimit, numeric_content_issues
 
 STEPS={'source':'检查货源事实','translate':'生成英阿内容','review':'模型复核','ai_visual':'AI制作与成片验收','images':'批量图片模板','video':'制作商品展示视频','image_host':'上传并核对图片','check':'检查刊登资料','approval':'等待人工审核','submit':'提交noon内容','finish':'流程完成'}
+MAX_CONCURRENCY=3
+SCAN_INTERVALS_MS=(400,1000,2000,5000,10000,30000)
 
 def workflow_input(b):
     ids=b.get('product_ids')
     if not isinstance(ids,list) or not 1<=len(ids)<=500 or any(not isinstance(i,str) for i in ids) or len(ids)!=len(set(ids)):raise Problem('请选择1至500个不同商品')
+    try:
+        for value in ids:value.encode('utf-8')
+    except UnicodeEncodeError:raise Problem('商品编号含有无效Unicode字符，请重新选择')
     raw=b.get('plan',{})
     if not isinstance(raw,dict):raise Problem('流程配置无效')
     template=raw.get('image_template','')
@@ -38,8 +44,9 @@ def workflow_input(b):
     return ids,plan
 
 class Automation:
-    def __init__(self,app):
-        self.app=app;self.store=app.store;self.stop=threading.Event();self.thread=None;self.last_status_scan=0.0
+    def __init__(self,app,clock=None):
+        self.app=app;self.store=app.store;self.stop=threading.Event();self.wake_event=threading.Event();self.thread=None;self.last_status_scan=0.0
+        self.clock=clock or (lambda: datetime.now(timezone.utc))
         with self.store.connect() as c:c.executescript('''
         CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,request_key TEXT UNIQUE,digest TEXT NOT NULL,name TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,run_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS automation_items(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,product_id TEXT NOT NULL,revision INTEGER NOT NULL,step INTEGER NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,data TEXT NOT NULL,message TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -50,12 +57,65 @@ class Automation:
         CREATE INDEX IF NOT EXISTS idx_automation_items_runnable ON automation_items(updated_at) WHERE status IN ('queued','waiting','approval');
         CREATE INDEX IF NOT EXISTS idx_automation_runs_status_at ON automation_runs(status,run_at);
         ''')
+    def concurrency_limit(self,c=None):
+        if c is None:
+            with self.store.connect() as connection:return self.concurrency_limit(connection)
+        row=c.execute("SELECT value FROM runtime_state WHERE key='automation_concurrency_limit'").fetchone()
+        try:value=int(row['value']) if row else 1
+        except (TypeError,ValueError):value=1
+        return value if 1<=value<=MAX_CONCURRENCY else 1
+    def scan_interval_ms(self,c=None):
+        if c is None:
+            with self.store.connect() as connection:return self.scan_interval_ms(connection)
+        row=c.execute("SELECT value FROM runtime_state WHERE key='automation_scan_interval_ms'").fetchone()
+        try:value=int(row['value']) if row else 400
+        except (TypeError,ValueError):value=400
+        return value if value in SCAN_INTERVALS_MS else 400
+    def configure_scheduler(self,b):
+        if not isinstance(b,dict) or not b or set(b)-{'concurrency_limit','scan_interval_ms'}:
+            raise Problem('调度设置无效')
+        values={}
+        if 'concurrency_limit' in b:
+            value=b['concurrency_limit']
+            if type(value) is not int or not 1<=value<=MAX_CONCURRENCY:
+                raise Problem(f'并发数量必须是1至{MAX_CONCURRENCY}的整数')
+            values['automation_concurrency_limit']=value
+        if 'scan_interval_ms' in b:
+            value=b['scan_interval_ms']
+            if type(value) is not int or value not in SCAN_INTERVALS_MS:
+                raise Problem('扫描间隔须选择0.4、1、2、5、10或30秒')
+            values['automation_scan_interval_ms']=value
+        with self.store.connect() as c:
+            for key,value in values.items():
+                c.execute('INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',(key,str(value),now()))
+        self.wake()
+        result={}
+        if 'automation_concurrency_limit' in values:result['concurrency_limit']=self.concurrency_limit()
+        if 'automation_scan_interval_ms' in values:result['scan_interval_ms']=self.scan_interval_ms()
+        return result
     def start(self):
-        with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='应用关闭时此步被中断，请核对商品和调用记录后重试',updated_at=? WHERE status='processing'",(now(),))
+        if self.thread and self.thread.is_alive():return
+        with self.store.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            interrupted=c.execute("""SELECT i.id,i.step,r.plan FROM automation_items i
+                JOIN automation_runs r ON r.id=i.run_id WHERE i.status='processing' ORDER BY i.rowid""").fetchall()
+            message='应用关闭时此步被中断，请核对商品和调用记录后重试';stamp=now()
+            for row in interrupted:
+                try:step=json.loads(row['plan'])['steps'][row['step']]
+                except (KeyError,IndexError,TypeError,ValueError):step='recovery'
+                changed=c.execute("UPDATE automation_items SET status='attention',message=?,updated_at=? WHERE id=? AND status='processing'",(message,stamp,row['id']))
+                if changed.rowcount:
+                    c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',
+                              (row['id'],step,'attention',message,stamp))
+        self.stop.clear()
         self.thread=threading.Thread(target=self.loop,name='automation',daemon=True);self.thread.start()
     def close(self):
         self.stop.set()
+        self.wake_event.set()
         if self.thread:self.thread.join(timeout=65)
+    def wake(self):
+        """Wake the durable scheduler after a user or service state change."""
+        self.wake_event.set()
     def state(self,page=0,group='all',query='',item_pages='{}',include_detail=True,include_counts=False):
         if not include_detail:
             with self.store.connect() as c:
@@ -91,9 +151,26 @@ class Automation:
             events=[dict(r) for r in c.execute('SELECT * FROM automation_events ORDER BY id DESC LIMIT 200')]
             active=c.execute("SELECT count(*) FROM automation_runs WHERE status NOT IN ('done','cancelled')").fetchone()[0]
             item_counts={r[0]:r[1] for r in c.execute('SELECT status,count(*) FROM automation_items GROUP BY status')}
+            current=self.clock().astimezone(timezone.utc).isoformat()
+            queue=c.execute('''SELECT sum(CASE WHEN i.status='queued' THEN 1 ELSE 0 END) AS due_queued,
+                sum(CASE WHEN i.status='processing' THEN 1 ELSE 0 END) AS processing,
+                min(CASE WHEN i.status='queued' THEN i.updated_at END) AS oldest_queued_at
+                FROM automation_items i JOIN automation_runs r ON r.id=i.run_id
+                WHERE r.status IN ('queued','running','attention') AND r.run_at<=?
+                  AND i.status IN ('queued','processing')''',(current,)).fetchone()
+            next_retry=c.execute("SELECT min(json_extract(data,'$.retry_at')) FROM automation_items WHERE status='waiting' AND json_extract(data,'$.retry_at') IS NOT NULL").fetchone()[0]
+            retry_reasons=[dict(r) for r in c.execute("SELECT message,count(*) AS items FROM automation_items WHERE status='waiting' GROUP BY message ORDER BY items DESC,message LIMIT 5")]
+        oldest_age=None
+        if queue['oldest_queued_at']:
+            try:oldest_age=max(0,int((self.clock()-datetime.fromisoformat(queue['oldest_queued_at'])).total_seconds()))
+            except (TypeError,ValueError):oldest_age=None
         for r in runs:r['plan']=json.loads(r['plan'])
         for i in items:i['data']=json.loads(i['data'])
-        return {'runs':runs,'items':items,'run_item_counts':run_item_counts,'item_pages':visible_pages,'events':events,'steps':STEPS,'scheduler_running':bool(self.thread and self.thread.is_alive()),'page':page,'pages':pages,'total':total,'page_size':10,'group':group,'query':query,'active_count':active,'item_counts':item_counts}
+        scheduler_running=bool(self.thread and self.thread.is_alive())
+        return {'runs':runs,'items':items,'run_item_counts':run_item_counts,'item_pages':visible_pages,'events':events,'steps':STEPS,'scheduler_running':scheduler_running,
+            'scheduler':{'running':scheduler_running,'concurrency_limit':self.concurrency_limit(),'max_concurrency':MAX_CONCURRENCY,'scan_interval_ms':self.scan_interval_ms(),'scan_intervals_ms':list(SCAN_INTERVALS_MS),'due_queued':queue['due_queued'] or 0,'processing':queue['processing'] or 0,
+                'oldest_queued_at':queue['oldest_queued_at'],'oldest_queued_seconds':oldest_age,'next_retry_at':next_retry,'retry_reasons':retry_reasons},
+            'page':page,'pages':pages,'total':total,'page_size':10,'group':group,'query':query,'active_count':active,'item_counts':item_counts}
     def attention(self,page=0,group='all'):
         try:index=int(page)
         except (TypeError,ValueError):raise Problem('待办页码无效')
@@ -159,7 +236,15 @@ class Automation:
             if self.active_product(c,pid):status='active';reasons=['已有未结束任务，请到自动化中心或任务记录查看']
             rows.append({'id':pid,'revision':p['revision'],'title':p['title_zh'],'sku':p['partner_sku'],'status':status,'reasons':reasons,
                 'missing_fields':missing,'translate':bool(translation),'review':bool(review),'images':images,'visual':visual_rows.get(pid),'issues':p['issues']})
-        token=hashlib.sha256(json.dumps([plan,rows,visual_preview['token'] if visual_preview else None,host_config],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        model_routes={}
+        required_roles={role for row in rows if row['status']=='ready'
+                        for role,used in (('primary',row['translate']),('review',row['review'])) if used}
+        for role in sorted(required_roles):
+            route=c.execute('''SELECT r.profile_id,p.revision FROM model_routes r
+                LEFT JOIN model_profiles p ON p.id=r.profile_id WHERE r.role=?''',(role,)).fetchone()
+            model_routes[role]=({'profile_id':route['profile_id'],'revision':route['revision']} if route else None)
+        token=hashlib.sha256(json.dumps([plan,rows,visual_preview['token'] if visual_preview else None,
+                                        host_config,model_routes],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         return {'token':token,'rows':rows,'eligible_ids':[r['id'] for r in rows if r['status']=='ready'],
             'calls':sum(int(r['translate'])+int(r['review']) for r in rows if r['status']=='ready'),
             'image_calls':sum(len(r['visual']['new_shots']) for r in rows if r['status']=='ready' and r['visual']),
@@ -171,7 +256,7 @@ class Automation:
                 c.execute('BEGIN IMMEDIATE');return self.create(b,connection=c)
         name=text(b.get('name'),'流程名称',80);key=text(b.get('request_id'),'请求编号',100)
         ids,plan=workflow_input(b)
-        stamp=b.get('run_at') or now()
+        stamp=b.get('run_at') or self.clock().astimezone(timezone.utc).isoformat()
         try:
             dt=datetime.fromisoformat(stamp.replace('Z','+00:00'))
             if dt.tzinfo is None:raise ValueError()
@@ -317,7 +402,7 @@ class Automation:
     def save(self,i,status,message,advance=False,data=None,revision=None):
         saved_data=dict(data if data is not None else i['data'])
         if status in ('waiting','approval') and not saved_data.get('retry_at'):
-            saved_data['retry_at']=(datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat()
+            saved_data['retry_at']=(self.clock().astimezone(timezone.utc)+timedelta(seconds=5)).isoformat()
         elif status not in ('waiting','approval'):
             saved_data.pop('retry_at',None)
         with self.store.connect() as c:
@@ -333,56 +418,86 @@ class Automation:
         i['data']=data
     def loop(self):
         while not self.stop.is_set():
-            try:self.tick()
+            # A state-change wake is distinct from the periodic fallback scan:
+            # it may retry waiting/approval rows immediately, while timeout
+            # scans continue to respect their persisted retry_at cooldown.
+            awakened=self.wake_event.wait(self.scan_interval_ms()/1000)
+            self.wake_event.clear()
+            if self.stop.is_set():break
+            try:self.tick(force_waiting=awakened)
             except Exception:
                 # Unexpected failures are visible and isolated; never run the same step silently forever.
                 with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='流程执行异常，请检查后重试',updated_at=? WHERE status='processing'",(now(),))
-            self.stop.wait(.4)
-    def tick(self):
+            # Timeout scans catch work completed outside this scheduler.
+    def tick(self,force_waiting=False):
         # Bound each pass and rotate by last update. A waiting item cannot keep
         # thousands of untouched products behind it in a large catalog run.
         with self.store.connect() as c:
-            cutoff=now()
+            cutoff=self.clock().astimezone(timezone.utc).isoformat()
             work=[row['id'] for row in c.execute("""SELECT i.id FROM automation_items i
                 JOIN automation_runs r ON r.id=i.run_id
                 WHERE r.status IN ('queued','running','attention') AND r.run_at<=?
                   AND i.status IN ('queued','waiting','approval')
-                  AND coalesce(json_extract(i.data,'$.retry_at'),'')<=?
-                ORDER BY i.updated_at,i.rowid LIMIT 100""",(cutoff,cutoff))]
-        for item_id in work:
-            if self.stop.is_set():break
-            with self.store.connect() as c:
-                c.execute('BEGIN IMMEDIATE')
-                row=c.execute('SELECT * FROM automation_items WHERE id=?',(item_id,)).fetchone()
-                if not row or row['status'] not in ('queued','waiting','approval'):continue
-                run=c.execute('SELECT * FROM automation_runs WHERE id=?',(row['run_id'],)).fetchone()
-                if not run or run['status'] not in ('queued','running','attention') or run['run_at']>now():continue
-                i=dict(row);i['data']=json.loads(i['data']);i['plan']=json.loads(run['plan']);i['step_name']=i['plan']['steps'][i['step']]
-                if i['data'].get('retry_at','')>now():continue
-                c.execute("UPDATE automation_items SET status='processing' WHERE id=?",(i['id'],))
-                c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=?",(now(),run['id']))
-            if self.stop.is_set():
-                self.save(i,i['status'],i['message']);break
-            try:self.process(i)
-            except ModelLimit as e:self.save(i,'waiting',str(e),data={**i['data'],'retry_at':e.retry_at})
-            except Problem as e:self.save(i,'attention',str(e))
-            except Exception:self.save(i,'attention','此步执行异常，未继续后续步骤；请检查资料和服务配置')
+                  AND (coalesce(json_extract(i.data,'$.retry_at'),'')<=?
+                    OR (? AND (i.status='approval' OR coalesce(json_extract(i.data,'$.retry_on_wake'),1)!=0)))
+                ORDER BY i.updated_at,i.rowid LIMIT 100""",(cutoff,cutoff,int(force_waiting)))]
+        limit=self.concurrency_limit()
+        pool=ThreadPoolExecutor(max_workers=limit,thread_name_prefix='automation-item') if limit>1 else None
+        try:
+            for offset in range(0,len(work),limit):
+                if self.stop.is_set():break
+                claimed=[]
+                for item_id in work[offset:offset+limit]:
+                    if self.stop.is_set():break
+                    with self.store.connect() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        row=c.execute('SELECT * FROM automation_items WHERE id=?',(item_id,)).fetchone()
+                        if not row or row['status'] not in ('queued','waiting','approval'):continue
+                        run=c.execute('SELECT * FROM automation_runs WHERE id=?',(row['run_id'],)).fetchone()
+                        current=self.clock().astimezone(timezone.utc).isoformat()
+                        if not run or run['status'] not in ('queued','running','attention') or run['run_at']>current:continue
+                        i=dict(row);i['data']=json.loads(i['data']);i['plan']=json.loads(run['plan']);i['step_name']=i['plan']['steps'][i['step']]
+                        if i['data'].get('retry_at','')>current and not (
+                            force_waiting and (i['status']=='approval' or i['data'].get('retry_on_wake',True) is not False)
+                        ):continue
+                        c.execute("UPDATE automation_items SET status='processing' WHERE id=?",(i['id'],))
+                        c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=?",(now(),run['id']))
+                    claimed.append(i)
+                if self.stop.is_set():
+                    for i in claimed:self.save(i,i['status'],i['message'])
+                    break
+                if pool and claimed:
+                    futures=[pool.submit(self.execute,i) for i in claimed]
+                    for future in as_completed(futures):future.result()
+                else:
+                    for i in claimed:
+                        if self.stop.is_set():break
+                        self.execute(i)
+        finally:
+            if pool:pool.shutdown(wait=True,cancel_futures=True)
         if time.monotonic()-self.last_status_scan<5:return
         self.last_status_scan=time.monotonic()
         with self.store.connect() as c:
+            current=self.clock().astimezone(timezone.utc).isoformat()
             groups=c.execute("""SELECT r.id,r.status,count(i.id) AS total,
                 sum(CASE WHEN i.status IN ('done','cancelled') THEN 1 ELSE 0 END) AS finished,
                 sum(CASE WHEN i.status NOT IN ('done','cancelled','attention','approval') THEN 1 ELSE 0 END) AS active
                 FROM automation_runs r JOIN automation_items i ON i.run_id=r.id
                 WHERE r.status IN ('queued','running','attention') AND r.run_at<=?
-                GROUP BY r.id""",(now(),)).fetchall()
+                GROUP BY r.id""",(current,)).fetchall()
             for group in groups:
                 status='done' if group['finished']==group['total'] else 'attention' if not group['active'] else 'running'
                 if status!=group['status']:
                     c.execute("UPDATE automation_runs SET status=? WHERE id=? AND status NOT IN ('paused','cancelled')",(status,group['id']))
+    def execute(self,i):
+        try:self.process(i)
+        except ModelLimit as e:self.save(i,'waiting',str(e),data={**i['data'],'retry_at':e.retry_at,'retry_on_wake':False})
+        except Problem as e:self.save(i,'attention',str(e))
+        except Exception:self.save(i,'attention','此步执行异常，未继续后续步骤；请检查资料和服务配置')
     def process(self,i):
         p=self.store.get(i['product_id']);step=i['step_name'];data=i['data'];key=f"workflow:{i['id']}:{step}:{i['attempt']}"
         data.pop('retry_at',None)
+        data.pop('retry_on_wake',None)
         if step=='video':
             from workflow_video import process
             return process(self,i,p)

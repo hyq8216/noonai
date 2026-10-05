@@ -78,6 +78,9 @@ class VisualChecks:
         ids=b.get('ids');profile=self.app.models.get(b.get('profile_id'))
         if profile['provider']!='codex-subscription' or not profile['enabled']:raise Problem('请选择已启用的Codex订阅模型，不会自动使用付费API',409)
         if not isinstance(ids,list) or not 1<=len(ids)<=500 or any(not isinstance(x,str) for x in ids) or len(set(ids))!=len(ids):raise Problem('请选择1至500个不同的生成图片任务')
+        try:
+            for value in ids:value.encode('utf-8')
+        except UnicodeEncodeError:raise Problem('图片任务编号含有无效Unicode字符，请重新选择')
         with self.store.connect() as c:
             old=[{**dict(r),'record':json.loads(r['result'] or '{}')} for r in c.execute("SELECT * FROM jobs WHERE kind='visual-check' AND json_extract(result,'$.visual_job_id') IN ("+','.join('?' for _ in ids)+") AND status!='cancelled' ORDER BY created_at DESC,rowid DESC",ids)]
             queued=c.execute("SELECT count(*) FROM jobs WHERE kind='visual-check' AND status IN ('waiting_image','queued','running','waiting','paused')").fetchone()[0]
@@ -99,7 +102,9 @@ class VisualChecks:
     def submit(self,b):
         key=b.get('request_id')
         if not isinstance(key,str) or not 1<=len(key)<=100 or not b.get('confirmed') is True:raise Problem('请确认本次检查会额外使用订阅额度')
-        request_digest=digest(b);ledger='visual-check:'+key
+        try:request_digest=digest(b)
+        except UnicodeEncodeError:raise Problem('检查请求含有无效Unicode字符，请重新预览')
+        ledger='visual-check:'+key
         with self.submit_lock,self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE');old=c.execute('SELECT * FROM ops_requests WHERE key=?',(ledger,)).fetchone()
             if old:

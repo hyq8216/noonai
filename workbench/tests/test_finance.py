@@ -33,6 +33,12 @@ class FinanceTests(unittest.TestCase):
   d=self.op('reserve',id=self.order['id'],revision=self.order['revision']);d=self.op('ship',id=d['id'],revision=d['revision'],carrier='测试',tracking='TEST');self.order=self.op('deliver',id=d['id'],revision=d['revision'],evidence='测试签收')
  def review(self,**extra):
   o=next(o for o in self.f.state()['orders'] if o['id']==self.order['id']);return self.call('review',**{'order_id':o['id'],'fingerprint':o['fingerprint'],'income_checked':True,'costs_checked':True,'refunds_checked':True,'note':'逐笔核对测试结算、物流、成本和售后凭证',**extra})
+ def test_unencodable_unicode_is_rejected_before_finance_receipt(self):
+  before=self.f.state()
+  with self.assertRaises(Problem):self.f.transact('entry',{'request_id':'bad-\ud800','kind':'income'})
+  after=self.f.state()
+  self.assertEqual(after['entries'],before['entries'])
+  with self.store.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM finance_requests').fetchone()[0],0)
  def test_source_orders_and_purchase_plans_never_become_revenue_or_cost(self):
   s=self.f.state();self.assertEqual(s['entries'],[]);self.assertIsNone(s['orders'][0]['contribution_cents']);self.assertEqual(s['summary']['active_entries'],0)
  def test_partial_receipt_fx_and_no_double_count(self):

@@ -47,7 +47,8 @@ class Operations:
     def transact(self, action, body):
         if not isinstance(body,dict): raise Problem('操作格式无效')
         key=text(body.get('request_id'), '操作编号',100)
-        digest=hashlib.sha256(json.dumps([action,body],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        try:digest=hashlib.sha256(json.dumps([action,body],sort_keys=True,ensure_ascii=False).encode('utf-8')).hexdigest()
+        except UnicodeEncodeError:raise Problem('操作内容含有无效Unicode字符，请检查后重试')
         with self.store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             old=c.execute('SELECT * FROM ops_requests WHERE key=?',(key,)).fetchone()
