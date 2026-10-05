@@ -867,22 +867,39 @@ print(json.dumps(result,ensure_ascii=False))
 `, data], {encoding:'utf8'});
       throw new Error(`${error.message}; automation UI=${JSON.stringify(automationUi)}; automation DB=${automationDb.stdout.trim()}; DB stderr=${automationDb.stderr}`);
     }
-    const workflowReadback = spawnSync(pythonExe, ['-c', `
+    const workflowReadbackScript = `
 import json,sqlite3,sys
 db=sqlite3.connect(sys.argv[1]+'/workbench.sqlite3');db.row_factory=sqlite3.Row
-saved=db.execute("SELECT id,data,approved_revision FROM products WHERE json_extract(data,'$.source_sku')='PERF-09999'").fetchone();product=json.loads(saved['data'])
-items=[dict(r) for r in db.execute("SELECT status,step,data FROM automation_items WHERE product_id=?",(saved['id'],))]
-calls=[dict(r) for r in db.execute("SELECT status,usage,profile FROM model_calls WHERE product_id=?",(saved['id'],))]
-assert product['title_en']=='Synthetic black storage clips',product
-assert 'مشابك' in product['title_ar'],product
-assert saved['approved_revision'] is None, saved['approved_revision']
-assert len(calls)==2 and all(c['status']=='done' for c in calls),calls
-assert len(items)==1 and items[0]['status']=='approval' and items[0]['step']==4,items
-assert db.execute('SELECT count(*) FROM jobs WHERE product_id=?',(saved['id'],)).fetchone()[0]==0
-print('translation=done|review=done|workflow=approval|human_approval=required|noon_writes=0')
-`, data], {encoding:'utf8'});
-    assert.equal(workflowReadback.status,0,workflowReadback.stderr);
-    assert.equal(workflowReadback.stdout.trim(),'translation=done|review=done|workflow=approval|human_approval=required|noon_writes=0');
+saved=db.execute("SELECT id,data,approved_revision FROM products WHERE json_extract(data,'$.source_sku')='PERF-09999'").fetchone()
+product=json.loads(saved['data']) if saved else {}
+items=[dict(r) for r in db.execute("SELECT status,step,data FROM automation_items WHERE product_id=?",(saved['id'],))] if saved else []
+calls=[dict(r) for r in db.execute("SELECT status,usage,profile FROM model_calls WHERE product_id=?",(saved['id'],))] if saved else []
+jobs=db.execute('SELECT count(*) FROM jobs WHERE product_id=?',(saved['id'],)).fetchone()[0] if saved else 0
+print(json.dumps({'product':product,'approved_revision':saved['approved_revision'] if saved else None,
+ 'items':items,'calls':calls,'jobs':jobs},ensure_ascii=False))
+`;
+    let workflowReadback;
+    let workflowState;
+    const workflowDeadline=Date.now()+10000;
+    do {
+      workflowReadback=spawnSync(pythonExe,['-c',workflowReadbackScript,data],{encoding:'utf8'});
+      assert.equal(workflowReadback.status,0,workflowReadback.stderr);
+      workflowState=JSON.parse(workflowReadback.stdout.trim());
+      const item=workflowState.items[0];
+      if(workflowState.items.length===1&&item.status==='approval'&&item.step===4&&workflowState.calls.length===2&&
+         workflowState.calls.every(call=>call.status==='done')&&workflowState.jobs===0)break;
+      if(['attention','cancelled'].includes(item?.status)||Date.now()>=workflowDeadline)break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    } while(Date.now()<workflowDeadline);
+    assert.equal(workflowState.product.title_en,'Synthetic black storage clips',workflowState);
+    assert.ok(workflowState.product.title_ar.includes('مشابك'),workflowState);
+    assert.equal(workflowState.approved_revision,null,workflowState.approved_revision);
+    assert.equal(workflowState.calls.length,2,workflowState.calls);
+    assert.ok(workflowState.calls.every(call=>call.status==='done'),workflowState.calls);
+    assert.equal(workflowState.items.length,1,workflowState.items);
+    assert.equal(workflowState.items[0].status,'approval',workflowState.items);
+    assert.equal(workflowState.items[0].step,4,workflowState.items);
+    assert.equal(workflowState.jobs,0,workflowState.jobs);
     assert.deepEqual(errors, [], 'uncaught browser JavaScript errors');
     console.log('PASS real Chromium startup, all 18 grouped navigation destinations on desktop and 390px mobile, supplier-content HTML injection guard in catalog and batch views, offline catalog campaign apply through bilingual generation and model review to required human-approval hold, photo-inbox settings through bilingual draft, fake subscription image candidates, per-image human approval and automatic attachment, product-level approval hold with no Noon submission, no-call preview guard, stock preview, zero-price and stale-offer warnings, scheduler settings, original photo selection/matching/rights/import with unmatched-row isolation, manual submit reconciliation, cross-batch issue CSV download, and source-lead preview/add/export');
   } catch (error) {

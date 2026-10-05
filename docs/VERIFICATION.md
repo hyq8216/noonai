@@ -1252,3 +1252,11 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 代码提交：`d3b402aa8836b478a547d501f56a50cce9bc36ae`，仅更新自动化/模型路由、对应测试及路线图/验证记录，不包含本机业务数据库、凭据、构建包或用户报告。
 - GitHub Actions push run #96（ID `37265640375`）和 PR run #97（ID `37265643022`）均为 `completed/success`；两次的 Ubuntu backend 与 Chromium browser jobs 均通过。后端全量回归、隔离启动/重启、浏览器依赖安装、JavaScript语法及真实 Chromium smoke 均完成。
 - PR [#6](https://github.com/hyq8216/noonai/pull/6) 保持草稿、未合并。此 CI 证明该代码快照在 Ubuntu/Chromium 测试环境的软件行为；不验证 macOS 签名/公证、真实供应商、付费模型或 Noon 店铺，`real_noon_verified=false`。
+
+
+### 2026-10-05 Chromium 铺货流程读回时序回归
+
+- 复现：文档记录提交触发 push run #98（ID `37265847407`）时，Ubuntu backend 全量测试成功，但 Chromium smoke 在双语生成/复核后读取 SQLite 的瞬间看到了 `queued` 第4步；模型调用均已完成，未发现浏览器或服务端异常。该提交的 PR run #99（ID `37265850050`）同一 Chromium 流程通过，确认存在收尾读回时序波动。
+- 修复：Chromium smoke 在检查模型回执和人工审核等待状态时，最多轮询临时数据库10秒，直到持久化状态同时满足审核等待、两次模型调用已完成且无 Noon 写任务；若进入 attention/cancelled 或超时仍会失败。保留商品未批准、Noon 写入数为0的断言。
+- 验证：本机 `node --check scripts/browser/smoke.cjs` 与真实 Chromium smoke 通过。随后 `bash scripts/check.sh` 退出0，**525项业务测试通过（60.397秒）**，隔离启动/调度/写保护/导入幂等/持久化重启通过；桌面与390px Chromium smoke通过。性能：10,000 SKU全量快照0.669秒、精确 SKU 搜索14毫秒、50件分页通过；`git diff --check` 通过。
+- 边界：浏览器回归只使用临时合成数据和离线模型替身；没有真实订阅调用、供应商连接或 Noon 提交，`real_noon_verified=false`。新 smoke 代码仍需由下一次该提交对应的 GitHub Actions 确认。
