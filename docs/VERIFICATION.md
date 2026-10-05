@@ -1260,3 +1260,11 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 修复：Chromium smoke 在检查模型回执和人工审核等待状态时，最多轮询临时数据库10秒，直到持久化状态同时满足审核等待、两次模型调用已完成且无 Noon 写任务；若进入 attention/cancelled 或超时仍会失败。保留商品未批准、Noon 写入数为0的断言。
 - 验证：本机 `node --check scripts/browser/smoke.cjs` 与真实 Chromium smoke 通过。随后 `bash scripts/check.sh` 退出0，**525项业务测试通过（60.397秒）**，隔离启动/调度/写保护/导入幂等/持久化重启通过；桌面与390px Chromium smoke通过。性能：10,000 SKU全量快照0.669秒、精确 SKU 搜索14毫秒、50件分页通过；`git diff --check` 通过。
 - 边界：浏览器回归只使用临时合成数据和离线模型替身；没有真实订阅调用、供应商连接或 Noon 提交，`real_noon_verified=false`。修复后的 smoke 在提交 `0988add2c45834d4b460ced2a7f2617e33bd6f33` 的 GitHub Actions push run #100 与 PR run #101 中，backend/browser jobs 全部通过。
+
+
+### 2026-10-05 GitHub Actions 重复邮件触发收敛
+
+- 原因：工作流同时监听 `codex/**` 分支的 `push` 与对应 PR 的 `pull_request`，每次功能分支提交会运行两套完整 CI；失败时可能收到重复通知。
+- 调整：push 只保留 `main` 分支；PR、每日定时和手动运行仍保留。功能分支提交只由 PR 事件执行一次完整检查，合并后的 main push 仍会回归。
+- 浏览器失败邮件对应前节记录的 Chromium 瞬时读回竞争；修复后的同一流程已在 run #100/#101 通过。本次触发配置提交的 PR run 另行记录其实际结果。
+- 边界：这是 CI 触发次数与失败根因的修正，不修改 GitHub 账号邮件订阅偏好；Noon 应用行为和 `real_noon_verified=false` 不变。
