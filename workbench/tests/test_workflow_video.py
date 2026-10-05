@@ -14,7 +14,14 @@ class WorkflowVideoTests(unittest.TestCase):
   for _ in range(3):self.a.tick()
  def item(self):return self.a.state()['items'][0]
  def test_real_video_returns_to_flow_and_no_repeat(self):
-  self.begin();self.a.tick();tid=self.item()['data']['video_task'];self.a.tick();self.assertEqual(self.item()['data']['video_task'],tid);self.media.control({'action':'resume'});self.assertEqual(self.wait(tid)['status'],'done');self.a.tick();self.assertEqual(len(self.item()['data']['video_outputs']),1);self.a.tick();self.assertEqual(self.item()['status'],'done')
+  self.begin();self.a.tick();tid=self.item()['data']['video_task'];self.a.tick();self.assertEqual(self.item()['data']['video_task'],tid);self.media.control({'action':'resume'});self.assertEqual(self.wait(tid)['status'],'done');self.a.tick();self.assertEqual(len(self.item()['data']['video_outputs']),1);self.assertEqual(self.item()['status'],'approval')
+  # Encoding completion does not replace playback approval.
+  self.a.tick();self.assertEqual(self.item()['status'],'approval');self.assertEqual(len(self.media.state()['tasks']),1)
+  from video_batch import VideoBatch
+  aid=self.item()['data']['video_outputs'][0];asset=self.media.get(aid)
+  with self.assertRaises(Problem):VideoBatch(self.app).review({'asset_id':aid,'decision':'approved','expected_sha256':asset['sha256'],'checks':{'identity':True}})
+  VideoBatch(self.app).review({'asset_id':aid,'decision':'approved','expected_sha256':asset['sha256'],'checks':{k:True for k in ('identity','motion','quality')}})
+  self.a.tick();self.a.tick();self.assertEqual(self.item()['status'],'done');self.assertEqual(len(self.media.state()['tasks']),1)
  def test_checkpoint_crash_replays_same_media_task(self):
   self.begin();original=self.a.checkpoint
   def crash(i,data):

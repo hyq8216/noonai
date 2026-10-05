@@ -9,7 +9,7 @@ from image_host import verify_public
 
 class ImageHostTests(unittest.TestCase):
  def setUp(self):
-  self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.h=self.app.image_host;self.s=self.app.store
+  self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.h=self.app.image_host;self.s=self.app.store;__import__('workflow_clock').install_clock(self.app.automation)
   self.config={'endpoint':'https://s3.example.test','region':'test-1','bucket':'test-bucket','prefix':'noon-images','public_base':'https://cdn.example.test','addressing_style':'path','access_key':'TESTACCESS','secret_key':'TESTSECRET'}
   self.pid=self.s.import_rows([{'title_zh':'测试商品','facts':'red card'}])['created'][0]
   buf=io.BytesIO();Image.new('RGB',(1600,1600),'red').save(buf,format='PNG');im=normalize_image(self.s,base64.b64encode(buf.getvalue()).decode(),'square')

@@ -2,6 +2,13 @@
 let catalogPage=0;
 const CATALOG_PAGE_SIZE=50;
 function mergeCatalog(next,previous){
+ if(next.catalog_bootstrap){
+  if(!Array.isArray(next.products))throw Error('商品分页资料不完整，请刷新重试');
+  const items=new Map((next.catalog_reset?[]:previous.products||[]).map(p=>[p.id,p]));
+  for(const p of next.products)items.set(p.id,p);
+  next.products=[...items.values()].sort((a,b)=>b.created_at.localeCompare(a.created_at)||a.id.localeCompare(b.id));
+  return next;
+ }
  if(Array.isArray(next.products))return next;
  if(next.catalog_unchanged){next.products=previous.products;return next}
  if(Array.isArray(next.product_changes)){

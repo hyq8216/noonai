@@ -43,7 +43,7 @@ def process(auto,i,p):
                 if pre['check_profile'] and pre['check_profile']['revision']!=i['plan']['ai_visual'].get('check_profile_revision'):raise Problem('对照检查模型配置已变化，请重新安排流程',409)
                 if row['revision']!=i['revision']:raise Problem('商品在排队前已变化，请重新核对',409)
                 if row['status']=='capacity':
-                    retry=(datetime.now(timezone.utc)+timedelta(minutes=1)).isoformat()
+                    retry=(auto.clock()+timedelta(minutes=1)).astimezone(timezone.utc).isoformat()
                     raise ModelLimit('AI制作或对照检查队列已满，一分钟后自动重试',retry)
                 if row['status'] not in ('ready','kept'):raise Problem('AI制作预检未通过：'+'；'.join(row['reasons']),409)
                 job_ids=[j['id'] for j in row['kept']]
@@ -52,7 +52,7 @@ def process(auto,i,p):
                 by_shot={app.visuals.get(jid,c)['recipe']['shot']:jid for jid in job_ids};job_ids=[by_shot[shot] for shot in b['shots']]
                 checks=app.visual_checks.reserve(job_ids,pre['check_profile'],'workflow:'+i['id'],c) if pre['check_profile'] else []
                 link={'job_ids':job_ids,'check_ids':checks,'source_signature':source_signature(p)};data={**data,'ai_visual':link}
-                c.execute('UPDATE automation_items SET data=?,updated_at=? WHERE id=?',(json.dumps(data,ensure_ascii=False),now(),i['id']))
+                c.execute('UPDATE automation_items SET data=?,updated_at=? WHERE id=?',(json.dumps(data,ensure_ascii=False),auto.now(),i['id']))
                 auto.store.event(c,p['id'],'流程AI视觉排队',f'关联 {len(job_ids)} 张成图与 {len(checks)} 项对照检查；未自动验收')
         i['data']=data;app.visuals.kick()
         auto.save(i,'waiting','AI制作已排队，成图后继续对照检查与成片验收',data=data);return

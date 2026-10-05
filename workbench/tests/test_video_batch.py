@@ -8,7 +8,7 @@ from video_batch import VideoBatch
 from core import Problem
 class VideoBatchTests(unittest.TestCase):
  def setUp(self):
-  self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.s=self.app.store;self.media=self.app.media;self.batch=VideoBatch(self.app);self.media.control({'action':'pause'})
+  self.tmp=tempfile.TemporaryDirectory();self.app=App(Path(self.tmp.name));self.s=self.app.store;self.media=self.app.media;self.batch=VideoBatch(self.app);self.media.control({'action':'pause'});__import__('workflow_clock').install_clock(self.app.automation)
  def tearDown(self):self.app.models.codex.close();self.app.visuals.close();self.app.visual_checks.close();self.media.close();self.app.executor.shutdown();self.tmp.cleanup()
  def product(self,title='Product',color='red',verified=True):
   pid=self.s.import_rows([{'title_zh':title,'facts':'test fixture','rights_evidence':'synthetic fixture'}])['created'][0];images=[]

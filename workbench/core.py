@@ -140,7 +140,7 @@ class Store:
     def list(self):
         with self.connect() as c:
             return [self.unpack(r) for r in c.execute('SELECT * FROM products ORDER BY created_at DESC, id')]
-    def catalog_snapshot(self,known_token=None):
+    def catalog_snapshot(self,known_token=None,paged=False):
         # All supported product mutations append a product event in the same transaction.
         # Re-read time-dependent checks periodically without retransmitting the whole catalog.
         # Approval/submission always validate live.
@@ -148,6 +148,28 @@ class Store:
             c.execute('BEGIN')
             latest=c.execute('SELECT coalesce(max(id),0) FROM events').fetchone()[0]
             bucket=int(time.time()//15);token=f'{self.catalog_session}:{latest}:{bucket}'
+            def bootstrap(cursor='',watermark=None,started_bucket=None,reset=True):
+                watermark=latest if watermark is None else watermark
+                started_bucket=bucket if started_bucket is None else started_bucket
+                rows=c.execute('SELECT * FROM products WHERE id>? ORDER BY id ASC LIMIT 501',(cursor,)).fetchall()
+                more=len(rows)>500;rows=rows[:500]
+                # Always hand off at the original event watermark. A final delta
+                # catches inserts before the cursor, edits and deletions between pages.
+                next_token=(f'{self.catalog_session}:b:{watermark}:{started_bucket}:{rows[-1]["id"]}'
+                            if more else f'{self.catalog_session}:{watermark}:{started_bucket}')
+                result={'catalog_token':next_token,'catalog_bootstrap':True,'catalog_has_more':True,
+                        'products':[self.unpack(r) for r in rows]}
+                if reset:result['catalog_reset']=True
+                return result
+            if paged and isinstance(known_token,str) and len(known_token)<150:
+                parts=known_token.split(':')
+                if len(parts)==5 and parts[0]==self.catalog_session and parts[1]=='b':
+                    if (parts[2].isdigit() and len(parts[2])<=19 and parts[3].isdigit() and len(parts[3])<=19
+                            and re.fullmatch('[0-9a-f]{32}',parts[4])):
+                        watermark=int(parts[2]);started_bucket=int(parts[3])
+                        if 0<=watermark<=latest and 0<=started_bucket<=bucket and bucket-started_bucket<=5760:
+                            return bootstrap(parts[4],watermark,started_bucket,False)
+                    return bootstrap()
             valid=False;last=0;prior_bucket=0
             if isinstance(known_token,str) and len(known_token)<100:
                 parts=known_token.split(':')
@@ -184,6 +206,7 @@ class Store:
                     else:items=[]
                     present={p['id'] for p in items}
                     return {'catalog_token':page_token,'catalog_has_more':has_more,'product_changes':items,'removed_product_ids':[i for i in ids if i not in present]}
+            if paged:return bootstrap()
             return {'catalog_token':token,'products':[self.unpack(r) for r in c.execute('SELECT * FROM products ORDER BY created_at DESC,id')]}
     def import_rows(self, rows, demo=False, connection=None):
         if connection is None:
@@ -250,6 +273,7 @@ class Store:
             data['category_verified'] = False
         for k in ('partner_sku','images','demo','platform','source_snapshot'):
             data[k] = p.get(k)
+        if 'source_collection' in p:data['source_collection']=p['source_collection']
         if 'image_urls' in raw:
             urls = raw['image_urls']
             if not isinstance(urls, dict) or any(k not in {im['id'] for im in data['images']} for k in urls):

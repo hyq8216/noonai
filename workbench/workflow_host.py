@@ -29,7 +29,7 @@ def process(auto,i,p):
         if current['revision']!=i['revision']:raise Problem('商品排队前已变化，请重新核对',409)
         if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND status IN ('queued','running')",(p['id'],)).fetchone():raise Problem('商品还有其他后台任务，请稍后重试',409)
         if c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]>=1000:raise Problem('后台队列已满，请稍后重试',409)
-        files=host.validated_files(snapshot);snapshot.update(_host_config=config['revision'],_host_hashes=[h for _,_,h in files]);jid=ident();ts=now()
+        files=host.validated_files(snapshot);snapshot.update(_host_config=config['revision'],_host_hashes=[h for _,_,h in files]);jid=ident();ts=auto.now()
         c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',(jid,p['id'],'image-host',p['revision'],'queued','流程图片等待上传与公网核对',None,ts,ts));data={**data,'host_job':jid}
         c.execute('UPDATE automation_items SET data=?,updated_at=? WHERE id=?',(json.dumps(data),ts,i['id']))
     try:app.executor.submit(app.run,jid,snapshot,'image-host')

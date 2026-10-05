@@ -81,7 +81,9 @@ class BatchTests(unittest.TestCase):
         rows=[{'title_zh':'QA '+str(i),'source_url':'https://example.com/'+str(i),'supplier':'QA','facts':'5 clips' if i%2==0 else ''} for i in range(500)]
         ids=self.store.import_rows(rows)['created'];b={'product_ids':ids,'plan':{'missing_only':True},'name':'500 QA','request_id':'500qa'}
         preview=self.auto.preflight(b);self.assertEqual(len(preview['eligible_ids']),250);self.assertEqual(len(preview['rows']),500)
-        self.auto.create({**b,'preflight_token':preview['token']});self.assertEqual(len(self.auto.state()['items']),250)
+        rid=self.auto.create({**b,'preflight_token':preview['token']})['id'];first=self.auto.state();self.assertEqual(first['run_item_counts'][rid],250)
+        pages=[self.auto.state(item_pages=json.dumps({rid:page}))['items'] for page in range(5)]
+        self.assertEqual(len({i['id'] for page in pages for i in page}),250);self.assertTrue(all(len(page)==50 for page in pages))
         with self.assertRaises(Problem):self.auto.preflight({**b,'product_ids':ids+[ids[0]]})
 
 if __name__=='__main__':unittest.main()

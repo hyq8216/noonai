@@ -1,0 +1,133 @@
+const assert = require('node:assert/strict');
+const {runWorkflow} = require('./harness.cjs');
+
+runWorkflow('batch edit cross-page facts and confirmed read-only schedule', async ({page,call,navigate,settle,mobile}) => {
+  const records = [
+    {title_zh:'GUI已知零值盒子',source_sku:'GUI-ZERO',supplier:'合成供应商',facts:'来源事实：零值盒子；尺寸10cm',cost_cny:0,stock:0},
+    ...Array.from({length:50}, (_, i)=>({title_zh:`分页占位商品${i}`,source_sku:`GUI-PAGE-${i}`,supplier:'合成供应商',facts:'分页测试原始事实',cost_cny:1,stock:1})),
+    {title_zh:'GUI未知值盒子',source_sku:'GUI-UNKNOWN',supplier:'合成供应商',facts:'来源事实：未知值盒子；尺寸20cm',cost_cny:null,stock:null}
+  ];
+  const imported = await call('/api/import',{products:records});
+  assert.equal(imported.created.length,52);
+  const knownId = imported.created[0], unknownId = imported.created[51];
+  const catalog = async()=>{
+    const first=await call('/api/batch-editor/state?page=0');
+    const second=await call('/api/batch-editor/state?page=1');
+    return [...first.rows,...second.rows];
+  };
+  const getPair=async()=>{
+    const rows=await catalog();
+    return {known:rows.find(r=>r.id===knownId),unknown:rows.find(r=>r.id===unknownId)};
+  };
+  await navigate('batch-editor');
+  assert.equal(await page.locator('[data-batch-edit-select]').count(),50);
+  await page.locator(`[data-batch-edit-select="${unknownId}"]`).check();
+  await page.locator('#batch-editor-next').click();
+  await settle();
+  await page.locator(`[data-batch-edit-select="${knownId}"]`).check();
+  assert.ok((await page.locator('#main').innerText()).includes('已选 2 件'));
+  await page.locator('#batch-editor-prev').click();
+  await settle();
+  assert.equal(await page.locator(`[data-batch-edit-select="${unknownId}"]`).isChecked(),true,'first page retains selection');
+  await page.locator('#batch-edit-use-cost_cny').check();
+  await page.locator('#batch-edit-cost_cny').fill('6');
+  await page.locator('#batch-edit-use-stock').check();
+  await page.locator('#batch-edit-stock').fill('6');
+  await page.locator('#batch-editor-form button[type="submit"]').click();
+  await page.locator('#batch-editor-confirm').waitFor();
+  await settle();
+  assert.equal(await page.locator('#batch-editor-apply').isDisabled(),true);
+  const pre=await page.evaluate(()=>batchEditorPreview);
+  assert.deepEqual({changed:pre.changed,unchanged:pre.unchanged,blocked:pre.blocked},{changed:1,unchanged:1,blocked:0});
+  const knownPreview=pre.rows.find(r=>r.id===knownId),unknownPreview=pre.rows.find(r=>r.id===unknownId);
+  assert.ok(knownPreview.fields.every(f=>f.old===0&&f.new===0&&!f.changed),'known zeros remain known');
+  assert.ok(unknownPreview.fields.every(f=>f.old===null&&f.new===6&&f.changed),'unknown numeric values are filled');
+  assert.ok((await page.locator('#main').innerText()).includes('0也是已知值'));
+  assert.ok((await page.locator('#main').innerText()).includes('补充未知值'));
+  await page.locator('#batch-editor-confirm').check();
+  await page.locator('#batch-editor-apply').click();
+  await settle();
+  let pair=await getPair();
+  assert.equal(pair.known.cost_cny,0);assert.equal(pair.known.stock,0);assert.equal(pair.known.revision,1);
+  assert.equal(pair.unknown.cost_cny,6);assert.equal(pair.unknown.stock,6);assert.equal(pair.unknown.revision,2);
+  assert.ok((await page.locator('#main').innerText()).includes('已修改 1 件'));
+
+  // Explicitly stop selecting numeric fields before switching to replace mode.
+  await page.locator('#batch-edit-use-cost_cny').uncheck();
+  await page.locator('#batch-edit-use-stock').uncheck();
+  await page.locator('#batch-edit-mode').selectOption('replace');
+  await page.locator('#batch-edit-use-facts').check();
+  await page.locator('#batch-edit-facts').fill('人工核对原始事实：盒子尺寸30cm；材质纸板');
+  await page.locator('#batch-editor-form button[type="submit"]').click();
+  await settle();
+  await page.locator('#batch-editor-confirm').check();
+  assert.equal(await page.locator('#batch-editor-apply').isDisabled(),false);
+  // Any later patch edit must revoke consent to the previous preview.
+  const finalFacts='人工核对原始事实：盒子尺寸31cm；材质纸板';
+  await page.locator('#batch-edit-facts').fill(finalFacts);
+  assert.equal(await page.locator('#batch-editor-confirm').isChecked(),false);
+  assert.equal(await page.locator('#batch-editor-confirm').isDisabled(),true);
+  assert.equal(await page.locator('#batch-editor-apply').isDisabled(),true);
+  assert.equal(await page.evaluate(()=>batchEditorConfirmed),false);
+  pair=await getPair();
+  assert.equal(pair.known.facts,records[0].facts);assert.equal(pair.unknown.facts,records[51].facts);
+  await page.locator('#batch-editor-form button[type="submit"]').click();
+  await settle();
+  assert.equal(await page.locator('#batch-editor-confirm').isChecked(),false);
+  assert.equal(await page.locator('#batch-editor-apply').isDisabled(),true);
+  const factsPreview=await page.evaluate(()=>batchEditorPreview);
+  assert.equal(factsPreview.changed,2);
+  assert.ok(factsPreview.rows.every(r=>r.fields.length===1&&r.fields[0].field==='facts'&&r.fields[0].new===finalFacts));
+  assert.ok(factsPreview.rows.every(r=>r.review_reasons.some(reason=>reason.includes('确认将失效'))));
+  await mobile();
+  await page.locator('details summary').first().click();
+  await mobile();
+  await page.locator('#batch-editor-confirm').check();
+  await page.locator('#batch-editor-apply').click();
+  await settle();
+  pair=await getPair();
+  assert.equal(pair.known.facts,finalFacts);assert.equal(pair.unknown.facts,finalFacts);
+  assert.equal(pair.known.revision,2);assert.equal(pair.unknown.revision,3);
+  assert.equal(pair.known.cost_cny,0);assert.equal(pair.known.stock,0);
+  assert.equal(pair.unknown.cost_cny,6);assert.equal(pair.unknown.stock,6);
+  assert.equal(pair.known.approved_revision,null);assert.equal(pair.unknown.approved_revision,null);
+  await mobile();
+
+  const account=await call('/api/channels/save',{provider:'custom_json',name:'GUI授权只读JSON',base_url:'https://example.com/authorized-catalog',enabled:true,config:{},token:''});
+  assert.equal(account.has_token,false);
+  await navigate('collection-schedules');
+  await page.locator('#schedule-new').click();
+  await page.locator('#schedule-name').fill('GUI周期规则：需明确启用');
+  await page.locator('#schedule-account').selectOption(account.id);
+  await page.locator('#schedule-query').fill('合成盒子');
+  await page.locator('#schedule-page_limit').fill('1');
+  await page.locator('#schedule-interval_minutes').fill('15');
+  assert.equal(await page.locator('#schedule-form [name="enabled"]').isChecked(),false);
+  await page.locator('#schedule-form [name="confirmed"]').check();
+  await page.locator('#schedule-form button[type="submit"]').click();
+  await settle();
+  let rules=(await call('/api/collection-schedules/state')).rules;
+  assert.equal(rules.length,1);assert.equal(rules[0].enabled,false);assert.equal(rules[0].next_run,null);
+  assert.equal((await call('/api/collection/state')).run_total,0);
+  await page.locator(`[data-schedule-edit="${rules[0].id}"]`).click();
+  assert.equal(await page.locator('#schedule-form [name="confirmed"]').isChecked(),false);
+  await page.locator('#schedule-form [name="enabled"]').check();
+  await page.locator('#schedule-form [name="confirmed"]').check();
+  await page.locator('#schedule-form button[type="submit"]').click();
+  await settle();
+  rules=(await call('/api/collection-schedules/state')).rules;
+  assert.equal(rules[0].enabled,true);assert.equal(rules[0].revision,2);
+  const secondsUntilDue=rules[0].next_run-Date.now()/1000;
+  assert.ok(secondsUntilDue>870&&secondsUntilDue<=905,'rule waits a future 15-minute interval');
+  assert.equal(rules[0].last_run_id,null);
+  assert.equal((await call('/api/collection/state')).run_total,0,'enabling a future rule does not immediately call a source');
+  await mobile();
+  page.once('dialog',dialog=>dialog.accept());
+  await page.locator('[data-schedule-control="pause"]').click();
+  await settle();
+  rules=(await call('/api/collection-schedules/state')).rules;
+  assert.equal(rules[0].enabled,false);assert.equal(rules[0].next_run,null);assert.equal(rules[0].revision,3);
+  assert.equal(rules[0].pause_reason,'手动暂停');
+  assert.equal((await call('/api/collection/state')).run_total,0,'GUI schedule never runs an external request');
+  await mobile();
+}).catch(error=>{console.error(error);process.exitCode=1});

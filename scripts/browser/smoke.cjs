@@ -32,13 +32,26 @@ const { chromium } = require('playwright');
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(url);
     await page.locator('[data-nav="automation"]').first().waitFor();
-    for (const view of ['products', 'import', 'automation', 'models', 'recovery', 'batch']) {
-      await page.locator(`[data-nav="${view}"]`).first().click();
-      await page.locator(`[data-nav="${view}"][aria-current="page"]`).waitFor();
-      await page.waitForTimeout(150);
+    await page.locator('#nav-search').fill('1688');
+    assert.equal(await page.locator('.nav [data-nav]').count(),2,'domestic collection must be searchable by supplier name');
+    await page.locator('#nav-search').fill('');
+    const views = await page.locator('.nav [data-nav]').evaluateAll(nodes =>
+      nodes.map(node => node.dataset.nav));
+    assert.equal(views.length, 40, 'all platform navigation surfaces must be covered');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const view of views) {
+        await page.locator(`.nav [data-nav="${view}"]`).click();
+        await page.locator(`.nav [data-nav="${view}"][aria-current="page"]`).waitFor();
+        await page.locator('main h1').waitFor();
+        await page.waitForTimeout(150);
+        const overflow = await page.evaluate(() =>
+          document.documentElement.scrollWidth - window.innerWidth);
+        assert.ok(overflow <= 1, `${view} overflows the ${width}px viewport by ${overflow}px`);
+      }
     }
     assert.deepEqual(errors, [], 'uncaught browser JavaScript errors');
-    console.log('PASS real Chromium startup and six navigation surfaces');
+    console.log('PASS real Chromium startup, all 40 navigation surfaces at 1440px and 390px, no page overflow or uncaught JavaScript errors');
   } catch (error) {
     throw new Error(`${error.message}; browser errors: ${JSON.stringify(errors)}; server errors: ${logs}`);
   } finally {

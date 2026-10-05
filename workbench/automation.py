@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from core import Problem, ident, now
+from core import Problem, ident
 from media import RECIPES
 from models import text, CONTENT_FIELDS, ModelLimit, numeric_content_issues
 
@@ -38,8 +38,10 @@ def workflow_input(b):
     return ids,plan
 
 class Automation:
-    def __init__(self,app):
-        self.app=app;self.store=app.store;self.stop=threading.Event();self.thread=None;self.last_status_scan=0.0
+    def __init__(self,app,clock=None,monotonic=None):
+        self.clock=clock or (lambda:datetime.now(timezone.utc))
+        self.monotonic=monotonic or time.monotonic
+        self.app=app;self.store=app.store;self.stop=threading.Event();self.thread=None;self.last_status_scan=None
         with self.store.connect() as c:c.executescript('''
         CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,request_key TEXT UNIQUE,digest TEXT NOT NULL,name TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,run_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS automation_items(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,product_id TEXT NOT NULL,revision INTEGER NOT NULL,step INTEGER NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,data TEXT NOT NULL,message TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -50,8 +52,10 @@ class Automation:
         CREATE INDEX IF NOT EXISTS idx_automation_items_runnable ON automation_items(updated_at) WHERE status IN ('queued','waiting','approval');
         CREATE INDEX IF NOT EXISTS idx_automation_runs_status_at ON automation_runs(status,run_at);
         ''')
+    def now(self):
+        return self.clock().astimezone(timezone.utc).isoformat()
     def start(self):
-        with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='应用关闭时此步被中断，请核对商品和调用记录后重试',updated_at=? WHERE status='processing'",(now(),))
+        with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='应用关闭时此步被中断，请核对商品和调用记录后重试',updated_at=? WHERE status='processing'",(self.now(),))
         self.thread=threading.Thread(target=self.loop,name='automation',daemon=True);self.thread.start()
     def close(self):
         self.stop.set()
@@ -171,7 +175,7 @@ class Automation:
                 c.execute('BEGIN IMMEDIATE');return self.create(b,connection=c)
         name=text(b.get('name'),'流程名称',80);key=text(b.get('request_id'),'请求编号',100)
         ids,plan=workflow_input(b)
-        stamp=b.get('run_at') or now()
+        stamp=b.get('run_at') or self.now()
         try:
             dt=datetime.fromisoformat(stamp.replace('Z','+00:00'))
             if dt.tzinfo is None:raise ValueError()
@@ -202,7 +206,7 @@ class Automation:
         for p in products:
             if p['demo']:raise Problem('示例商品不能进入运营流程')
             if self.active_product(c,p['id']):raise Problem(p['title_zh']+'已有未结束任务',409)
-        rid=ident();ts=now();c.execute('INSERT INTO automation_runs VALUES(?,?,?,?,?,?,?,?,?)',(rid,key,digest,name,json.dumps(plan),'queued',stamp,ts,ts))
+        rid=ident();ts=self.now();c.execute('INSERT INTO automation_runs VALUES(?,?,?,?,?,?,?,?,?)',(rid,key,digest,name,json.dumps(plan),'queued',stamp,ts,ts))
         for p in products:c.execute('INSERT INTO automation_items VALUES(?,?,?,?,?,?,?,?,?,?)',(ident(),rid,p['id'],p['revision'],0,'queued',0,'{}','等待开始',ts))
         return {'id':rid}
     def control(self,b):
@@ -214,11 +218,11 @@ class Automation:
                 if not r:raise Problem('流程不存在',404)
                 if r['status'] in ('done','cancelled'):raise Problem('流程已结束',409)
                 status='paused' if action=='pause' else 'cancelled' if action=='cancel_run' else 'running'
-                c.execute('UPDATE automation_runs SET status=?,updated_at=? WHERE id=?',(status,now(),r['id']))
+                c.execute('UPDATE automation_runs SET status=?,updated_at=? WHERE id=?',(status,self.now(),r['id']))
                 if action=='cancel_run':
                     from workflow_visual import cancel_children
                     cancel_children(c,c.execute("SELECT data FROM automation_items WHERE run_id=? AND status NOT IN ('done','cancelled')",(r['id'],)).fetchall())
-                    c.execute("UPDATE automation_items SET status='cancelled',message='已取消后续步骤；已发生的操作和在途请求不会回滚',updated_at=? WHERE run_id=? AND status NOT IN ('done','cancelled')",(now(),r['id']))
+                    c.execute("UPDATE automation_items SET status='cancelled',message='已取消后续步骤；已发生的操作和在途请求不会回滚',updated_at=? WHERE run_id=? AND status NOT IN ('done','cancelled')",(self.now(),r['id']))
                 return {'id':r['id']}
             i=c.execute('SELECT * FROM automation_items WHERE id=?',(b.get('item_id'),)).fetchone()
             if not i:raise Problem('商品流程不存在',404)
@@ -226,7 +230,7 @@ class Automation:
             if action=='cancel_item' and i['status'] not in ('done','cancelled'):
                 from workflow_visual import cancel_children
                 cancel_children(c,[i])
-                c.execute("UPDATE automation_items SET status='cancelled',message='已取消后续步骤；在途请求不会回滚',updated_at=? WHERE id=?",(now(),i['id']))
+                c.execute("UPDATE automation_items SET status='cancelled',message='已取消后续步骤；在途请求不会回滚',updated_at=? WHERE id=?",(self.now(),i['id']))
             elif action in ('retry','retry_fallback') and i['status'] in ('attention','approval'):
                 if step=='submit':raise Problem('提交结果可能已到达平台，禁止流程直接重发。请在商品页面回查平台后重新安排。',409)
                 if action=='retry_fallback' and step!='translate':raise Problem('备用模型重试只适用于内容生成步骤')
@@ -244,9 +248,12 @@ class Automation:
                     job=c.execute('SELECT status FROM jobs WHERE id=?',(data['host_job'],)).fetchone()
                     if job and job['status'] in ('failed','interrupted','cancelled'):data.pop('host_job')
                 data.pop('children',None);data.pop('image_assets',None)
+                # An explicit retry must not inherit the prior approval polling delay.
+                # Model/service budgets are still checked again before dispatch.
+                data.pop('retry_at',None)
                 if action=='retry_fallback':data['translation_role']='fallback'
-                c.execute("UPDATE automation_items SET status='queued',revision=?,attempt=attempt+1,data=?,message='按当前版本重试本步',updated_at=? WHERE id=?",(p['revision'],json.dumps(data),now(),i['id']))
-                c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(now(),i['run_id']))
+                c.execute("UPDATE automation_items SET status='queued',revision=?,attempt=attempt+1,data=?,message='按当前版本重试本步',updated_at=? WHERE id=?",(p['revision'],json.dumps(data),self.now(),i['id']))
+                c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(self.now(),i['run_id']))
             else:raise Problem('此状态不能执行该操作',409)
         return {'id':i['id']}
     def rework_visual(self,b):
@@ -297,19 +304,19 @@ class Automation:
                 'locked_features':recipe['identity']['locked_features'],'confirmed':True,'confirmed_unassigned':True},connection=c)
             replacement=submitted['job_ids'][0];shots[position]=replacement
             if old['status']=='output_rejected':
-                c.execute("UPDATE visual_jobs SET status='cancelled',message='不合规格输出已由新任务替代；原文件保留',updated_at=? WHERE id=?",(now(),jid))
+                c.execute("UPDATE visual_jobs SET status='cancelled',message='不合规格输出已由新任务替代；原文件保留',updated_at=? WHERE id=?",(self.now(),jid))
             if profile:
                 old_check=check_ids[position]
                 checked=c.execute('SELECT status FROM jobs WHERE id=? AND kind=?',(old_check,'visual-check')).fetchone()
                 if not checked:raise Problem('原图片检查任务不存在，请先核对',409)
                 if checked['status'] in ('waiting_image','queued','waiting','paused','blocked') and not c.execute('SELECT 1 FROM model_calls WHERE request_key=?',('visual-check-'+old_check,)).fetchone():
-                    c.execute("UPDATE jobs SET status='cancelled',message='原图已重做，停止尚未发送的旧图片检查',updated_at=? WHERE id=?",(now(),old_check))
+                    c.execute("UPDATE jobs SET status='cancelled',message='原图已重做，停止尚未发送的旧图片检查',updated_at=? WHERE id=?",(self.now(),old_check))
                 check_ids[position]=self.app.visual_checks.reserve([replacement],profile,'workflow-rework:'+item['id'],c)[0]
             data['ai_visual']={**link,'job_ids':shots,'check_ids':check_ids}
             data.pop('retry_at',None)
-            c.execute("UPDATE automation_items SET status='waiting',attempt=attempt+1,data=?,message='未通过图片已重新排队，等待新图与验收',updated_at=? WHERE id=?",(json.dumps(data,ensure_ascii=False),now(),item['id']))
-            c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(now(),item['run_id']))
-            c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',(item['id'],'ai_visual','waiting','重做未通过图片；原任务与验收记录保留',now()))
+            c.execute("UPDATE automation_items SET status='waiting',attempt=attempt+1,data=?,message='未通过图片已重新排队，等待新图与验收',updated_at=? WHERE id=?",(json.dumps(data,ensure_ascii=False),self.now(),item['id']))
+            c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(self.now(),item['run_id']))
+            c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',(item['id'],'ai_visual','waiting','重做未通过图片；原任务与验收记录保留',self.now()))
             result={'job_id':replacement,'item_id':item['id'],'run_id':item['run_id'],'replayed':False}
             c.execute('INSERT INTO ops_requests VALUES(?,?,?)',(ledger,fingerprint,json.dumps(result,ensure_ascii=False)))
         self.app.visuals.kick()
@@ -317,7 +324,7 @@ class Automation:
     def save(self,i,status,message,advance=False,data=None,revision=None):
         saved_data=dict(data if data is not None else i['data'])
         if status in ('waiting','approval') and not saved_data.get('retry_at'):
-            saved_data['retry_at']=(datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat()
+            saved_data['retry_at']=(self.clock()+timedelta(seconds=5)).astimezone(timezone.utc).isoformat()
         elif status not in ('waiting','approval'):
             saved_data.pop('retry_at',None)
         with self.store.connect() as c:
@@ -325,24 +332,24 @@ class Automation:
             # A concurrent cancellation remains terminal, even if an in-flight call completes.
             row=c.execute('SELECT status FROM automation_items WHERE id=?',(i['id'],)).fetchone()
             if row['status']=='cancelled':return
-            c.execute('UPDATE automation_items SET status=?,step=?,revision=?,data=?,message=?,updated_at=? WHERE id=?',(status,i['step']+int(advance),revision if revision is not None else i['revision'],json.dumps(saved_data,ensure_ascii=False),message,now(),i['id']))
+            c.execute('UPDATE automation_items SET status=?,step=?,revision=?,data=?,message=?,updated_at=? WHERE id=?',(status,i['step']+int(advance),revision if revision is not None else i['revision'],json.dumps(saved_data,ensure_ascii=False),message,self.now(),i['id']))
             if advance or status!=i['status'] or message!=i['message']:
-                c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',(i['id'],i['step_name'],status,message,now()))
+                c.execute('INSERT INTO automation_events(item_id,step,status,message,created_at) VALUES(?,?,?,?,?)',(i['id'],i['step_name'],status,message,self.now()))
     def checkpoint(self,i,data):
-        with self.store.connect() as c:c.execute('UPDATE automation_items SET data=?,updated_at=? WHERE id=? AND status!=?',(json.dumps(data),now(),i['id'],'cancelled'))
+        with self.store.connect() as c:c.execute('UPDATE automation_items SET data=?,updated_at=? WHERE id=? AND status!=?',(json.dumps(data),self.now(),i['id'],'cancelled'))
         i['data']=data
     def loop(self):
         while not self.stop.is_set():
             try:self.tick()
             except Exception:
                 # Unexpected failures are visible and isolated; never run the same step silently forever.
-                with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='流程执行异常，请检查后重试',updated_at=? WHERE status='processing'",(now(),))
+                with self.store.connect() as c:c.execute("UPDATE automation_items SET status='attention',message='流程执行异常，请检查后重试',updated_at=? WHERE status='processing'",(self.now(),))
             self.stop.wait(.4)
     def tick(self):
         # Bound each pass and rotate by last update. A waiting item cannot keep
         # thousands of untouched products behind it in a large catalog run.
         with self.store.connect() as c:
-            cutoff=now()
+            cutoff=self.now()
             work=[row['id'] for row in c.execute("""SELECT i.id FROM automation_items i
                 JOIN automation_runs r ON r.id=i.run_id
                 WHERE r.status IN ('queued','running','attention') AND r.run_at<=?
@@ -356,26 +363,27 @@ class Automation:
                 row=c.execute('SELECT * FROM automation_items WHERE id=?',(item_id,)).fetchone()
                 if not row or row['status'] not in ('queued','waiting','approval'):continue
                 run=c.execute('SELECT * FROM automation_runs WHERE id=?',(row['run_id'],)).fetchone()
-                if not run or run['status'] not in ('queued','running','attention') or run['run_at']>now():continue
+                if not run or run['status'] not in ('queued','running','attention') or run['run_at']>self.now():continue
                 i=dict(row);i['data']=json.loads(i['data']);i['plan']=json.loads(run['plan']);i['step_name']=i['plan']['steps'][i['step']]
-                if i['data'].get('retry_at','')>now():continue
+                if i['data'].get('retry_at','')>self.now():continue
                 c.execute("UPDATE automation_items SET status='processing' WHERE id=?",(i['id'],))
-                c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=?",(now(),run['id']))
+                c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=?",(self.now(),run['id']))
             if self.stop.is_set():
                 self.save(i,i['status'],i['message']);break
             try:self.process(i)
             except ModelLimit as e:self.save(i,'waiting',str(e),data={**i['data'],'retry_at':e.retry_at})
             except Problem as e:self.save(i,'attention',str(e))
             except Exception:self.save(i,'attention','此步执行异常，未继续后续步骤；请检查资料和服务配置')
-        if time.monotonic()-self.last_status_scan<5:return
-        self.last_status_scan=time.monotonic()
+        scan_time=self.monotonic()
+        if self.last_status_scan is not None and scan_time-self.last_status_scan<5:return
+        self.last_status_scan=scan_time
         with self.store.connect() as c:
             groups=c.execute("""SELECT r.id,r.status,count(i.id) AS total,
                 sum(CASE WHEN i.status IN ('done','cancelled') THEN 1 ELSE 0 END) AS finished,
                 sum(CASE WHEN i.status NOT IN ('done','cancelled','attention','approval') THEN 1 ELSE 0 END) AS active
                 FROM automation_runs r JOIN automation_items i ON i.run_id=r.id
                 WHERE r.status IN ('queued','running','attention') AND r.run_at<=?
-                GROUP BY r.id""",(now(),)).fetchall()
+                GROUP BY r.id""",(self.now(),)).fetchall()
             for group in groups:
                 status='done' if group['finished']==group['total'] else 'attention' if not group['active'] else 'running'
                 if status!=group['status']:
@@ -462,7 +470,7 @@ class Automation:
         elif step=='submit':
             if not data.get('submit_job'):
                 # Persist intent before a possible external write. A crash leaves attention, never auto-resubmission.
-                self.checkpoint(i,{**data,'submit_intent_at':now()})
+                self.checkpoint(i,{**data,'submit_intent_at':self.now()})
                 result=self.app.queue(p['id'],'submit',p['revision']);data=i['data'];data['submit_job']=result['job_id'];self.checkpoint(i,data)
                 self.save(i,'waiting','等待noon内容提交结果',data=data);return
             with self.store.connect() as c:job=c.execute('SELECT * FROM jobs WHERE id=?',(data['submit_job'],)).fetchone()
