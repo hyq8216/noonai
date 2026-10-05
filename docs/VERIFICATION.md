@@ -1245,3 +1245,10 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 回归：测试覆盖排队后主路由切换、复核路由切换、已确认配置修订变化后零模型调用、旧版本无快照流程的停止与显式恢复，以及备用路由在明确重试后的锁定。自动化/模型专项 **48项通过（12.036秒）**，目录铺货专项 **7项通过（约1.2秒）**。
 - 全量：`bash scripts/check.sh` 退出0，**525项业务测试通过（69.966秒）**；隔离启动/调度/写保护/导入幂等/持久化重启通过；真实 Chromium 桌面与390px移动端 smoke通过。10,000 SKU快照0.660秒、精确SKU搜索11毫秒、50件分页通过；`git diff --check` 通过。
 - 边界：仅使用临时数据与合成 HTTP 模型回复，没有发起真实 API、订阅模型、供应商或 Noon 调用；商品仍需人工审核，`real_noon_verified=false`。
+
+
+### 2026-10-05 排队模型路由修复 Ubuntu CI
+
+- 代码提交：`d3b402aa8836b478a547d501f56a50cce9bc36ae`，仅更新自动化/模型路由、对应测试及路线图/验证记录，不包含本机业务数据库、凭据、构建包或用户报告。
+- GitHub Actions push run #96（ID `37265640375`）和 PR run #97（ID `37265643022`）均为 `completed/success`；两次的 Ubuntu backend 与 Chromium browser jobs 均通过。后端全量回归、隔离启动/重启、浏览器依赖安装、JavaScript语法及真实 Chromium smoke 均完成。
+- PR [#6](https://github.com/hyq8216/noonai/pull/6) 保持草稿、未合并。此 CI 证明该代码快照在 Ubuntu/Chromium 测试环境的软件行为；不验证 macOS 签名/公证、真实供应商、付费模型或 Noon 店铺，`real_noon_verified=false`。
