@@ -180,6 +180,42 @@ class CatalogCampaignTests(unittest.TestCase):
         exceptions = self.campaign.exceptions(body['request_id'])['rows']
         self.assertEqual([row['id'] for row in exceptions], [missing_id])
 
+    def test_campaign_confirmation_expires_when_product_becomes_or_stops_being_active(self):
+        product_id = self.products(1)[0]
+        active_body = {'product_ids': [product_id], 'plan': {'translate': False},
+                       'name': '确认前已有流程', 'request_id': 'active-before-campaign-preview'}
+        active_token = self.app.automation.preflight(active_body)['token']
+        active_run = self.app.automation.create({**active_body, 'preflight_token': active_token})
+
+        campaign_body = self.body([product_id], request_id='active-state-changed-after-preview')
+        active_preview = self.campaign.preview(campaign_body)
+        self.assertEqual(active_preview['totals']['active'], 1)
+        self.app.automation.control({'action': 'cancel_run', 'run_id': active_run['id']})
+        with self.assertRaises(Problem) as cancelled:
+            self.campaign.apply({**campaign_body, 'preview_token': active_preview['token']})
+        self.assertEqual(cancelled.exception.status, 409)
+        fresh = self.campaign.preview(campaign_body)
+        self.assertEqual(fresh['totals']['ready'], 1)
+
+        apply_body = self.body([product_id], request_id='new-active-state-after-preview')
+        ready_preview = self.campaign.preview(apply_body)
+        self.assertEqual(ready_preview['totals']['ready'], 1)
+        second_active = self.app.automation.create({**active_body,
+            'request_id': 'active-created-after-campaign-preview',
+            'preflight_token': active_token})
+        with self.assertRaises(Problem) as started:
+            self.campaign.apply({**apply_body, 'preview_token': ready_preview['token']})
+        self.assertEqual(started.exception.status, 409)
+
+        with self.store.connect() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM ops_requests WHERE key IN (?,?)",
+                ('catalog-campaign:active-state-changed-after-preview',
+                 'catalog-campaign:new-active-state-after-preview')).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM automation_items WHERE run_id=?",
+                (second_active['id'],)).fetchone()[0], 1)
+
     def test_full_5000_catalog_campaign_creates_ten_exactly_sized_runs_and_replays(self):
         ids = self.products(5000)
         body = self.body(ids, plan={'translate': False}, request_id='full-catalog-5000')
