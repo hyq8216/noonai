@@ -246,6 +246,7 @@ class Automation:
         token=hashlib.sha256(json.dumps([plan,rows,visual_preview['token'] if visual_preview else None,
                                         host_config,model_routes],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         return {'token':token,'rows':rows,'eligible_ids':[r['id'] for r in rows if r['status']=='ready'],
+            'model_routes':model_routes,
             'calls':sum(int(r['translate'])+int(r['review']) for r in rows if r['status']=='ready'),
             'image_calls':sum(len(r['visual']['new_shots']) for r in rows if r['status']=='ready' and r['visual']),
             'visual_profile_revision':visual_preview['check_profile']['revision'] if visual_preview and visual_preview['check_profile'] else None,
@@ -277,6 +278,7 @@ class Automation:
             if not ids:raise Problem('本批没有可处理商品，请先补充资料或调整步骤',409)
         elif len(preview['eligible_ids'])!=len(ids):
             raise Problem('部分商品未通过流程预检：'+next('；'.join(r['reasons']) for r in preview['rows'] if r['status']!='ready'),409)
+        plan['confirmed_model_routes']=preview['model_routes']
         if plan.get('ai_visual',{}).get('auto_check'):
             plan['ai_visual']['check_profile_revision']=self.app.models.get(plan['ai_visual']['check_profile_id'],c)['revision']
         if plan.get('image_host'):
@@ -330,6 +332,11 @@ class Automation:
                     if job and job['status'] in ('failed','interrupted','cancelled'):data.pop('host_job')
                 data.pop('children',None);data.pop('image_assets',None)
                 if action=='retry_fallback':data['translation_role']='fallback'
+                if step=='translate':
+                    role='fallback' if action=='retry_fallback' or data.get('translation_role')=='fallback' else 'primary'
+                    data['translation_route_snapshot']=self.app.models.route_snapshot(role,c)
+                elif step=='review':
+                    data['review_route_snapshot']=self.app.models.route_snapshot('review',c)
                 c.execute("UPDATE automation_items SET status='queued',revision=?,attempt=attempt+1,data=?,message='按当前版本重试本步',updated_at=? WHERE id=?",(p['revision'],json.dumps(data),now(),i['id']))
                 c.execute("UPDATE automation_runs SET status='running',updated_at=? WHERE id=? AND status NOT IN ('paused','cancelled')",(now(),i['run_id']))
             else:raise Problem('此状态不能执行该操作',409)
@@ -519,7 +526,17 @@ class Automation:
             fields=[k for k in CONTENT_FIELDS if not p.get(k,'').strip()] if i['plan'].get('missing_only') else CONTENT_FIELDS
             if not fields:
                 self.save(i,'queued','双语内容已齐全，保留原稿，未调用模型',True);return
-            result=self.app.models.translate(p,key,data.get('translation_role','primary'))
+            role=data.get('translation_role','primary')
+            if role=='fallback':
+                route_snapshot=data.get('translation_route_snapshot')
+            elif data.get('translation_route_snapshot'):
+                route_snapshot=data['translation_route_snapshot']
+            else:
+                routes=i['plan'].get('confirmed_model_routes')
+                if not isinstance(routes,dict) or role not in routes:
+                    raise Problem('此旧流程没有已确认的模型配置，未调用模型；请核对配置后点击重试',409)
+                route_snapshot=routes[role]
+            result=self.app.models.translate(p,key,role,route_snapshot=route_snapshot)
             draft={k:result['content'][k] for k in fields}
             numeric=numeric_content_issues(p,{**p,**draft})
             model_warnings=[w for w in result['warnings'] if w not in result.get('numeric_issues',[])]
@@ -532,7 +549,13 @@ class Automation:
             if i['plan'].get('missing_only') and p.get('content_verified') and all(p.get(k,'').strip() for k in CONTENT_FIELDS):
                 self.save(i,'queued','内容已人工核对，保留确认，未调用复核模型',True);return
             if any(not p.get(k) for k in CONTENT_FIELDS):raise Problem('双语字段未齐全，不能复核')
-            result=self.app.models.review(p,key);data['review']={k:result[k] for k in ('call_id','model','passed','warnings')}
+            route_snapshot=data.get('review_route_snapshot')
+            if not route_snapshot:
+                routes=i['plan'].get('confirmed_model_routes')
+                if not isinstance(routes,dict) or 'review' not in routes:
+                    raise Problem('此旧流程没有已确认的模型配置，未调用模型；请核对配置后点击重试',409)
+                route_snapshot=routes['review']
+            result=self.app.models.review(p,key,route_snapshot=route_snapshot);data['review']={k:result[k] for k in ('call_id','model','passed','warnings')}
             if not result['passed'] or result['warnings']:self.save(i,'attention','模型复核提出问题，请查看备注并修改商品',data=data)
             else:self.save(i,'queued','模型复核未发现问题，仍需人工审核',True,data)
         elif step=='images':

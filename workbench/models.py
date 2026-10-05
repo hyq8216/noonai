@@ -249,19 +249,29 @@ class Models:
         with self.store.connect() as c:
             row=c.execute('SELECT profile_id FROM model_routes WHERE role=?',(role,)).fetchone()
             return bool(row and row[0])
+    def route_snapshot(self,role,c=None):
+        if c is None:
+            with self.store.connect() as connection:return self.route_snapshot(role,connection)
+        row=c.execute('''SELECT r.profile_id,p.revision FROM model_routes r
+            JOIN model_profiles p ON p.id=r.profile_id WHERE r.role=?''',(role,)).fetchone()
+        if not row or not row['profile_id']:
+            raise Problem('请先配置'+{'primary':'批量处理','review':'内容复核','fallback':'备用'}[role]+'模型',409)
+        return {'profile_id':row['profile_id'],'revision':row['revision']}
     def resolve(self,role):
         with self.store.connect() as c:
             row=c.execute('SELECT profile_id FROM model_routes WHERE role=?',(role,)).fetchone()
             if not row or not row[0]:raise Problem('请先配置'+{'primary':'批量处理','review':'内容复核','fallback':'备用'}[role]+'模型',409)
             return self.get(row[0],c)
-    def call(self,pid,source,key,purpose='translate',product_id=None,image_paths=None):
+    def call(self,pid,source,key,purpose='translate',product_id=None,image_paths=None,expected_revision=None):
         p=self.get(pid)
+        if expected_revision is not None and p['revision']!=expected_revision:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         if purpose=='visual-check' and (p['provider']!='codex-subscription' or not image_paths):raise Problem('图片对照检查仅使用已配置的Codex订阅，并需要原图和输出图片',409)
-        if p['provider']!='codex-subscription':return self._call(pid,source,key,purpose,product_id)
+        if p['provider']!='codex-subscription':return self._call(pid,source,key,purpose,product_id,expected_revision=expected_revision)
         if not p['enabled']:raise Problem('模型未启用',409)
         # Replays are resolved from the ledger even while offline or logged out.
         with self.store.connect() as c:old=c.execute('SELECT 1 FROM model_calls WHERE request_key=?',(key,)).fetchone()
-        if old:return self._call(pid,source,key,purpose,product_id,image_paths=image_paths)
+        if old:return self._call(pid,source,key,purpose,product_id,image_paths=image_paths,expected_revision=expected_revision)
         try:
             with self.codex.session() as (rpc,cwd):
                 self.codex.preflight(rpc,p['model'])
@@ -337,14 +347,20 @@ class Models:
             uncertain=subscription or isinstance(e,UncertainExternalCall)
             with self.store.connect() as c:c.execute("UPDATE model_calls SET status=?,usage=?,charged_micro=?,message=?,updated_at=? WHERE id=?",('uncertain' if uncertain else 'failed',json.dumps(usage),charged,message,now(),cid))
             raise Problem(message, e.status if isinstance(e,Problem) else 502)
-    def translate(self,p,request_key,role='primary'):
+    def translate(self,p,request_key,role='primary',route_snapshot=None):
         if not p.get('facts'):raise Problem('先填写规格事实，避免无依据生成',409)
-        profile=self.resolve(role)
+        snapshot=route_snapshot or self.route_snapshot(role)
+        profile=self.get(snapshot['profile_id'])
+        if profile['revision']!=snapshot['revision']:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         source={k:p.get(k) for k in ('title_zh','facts','brand','source_sku')}
         source['preferred_terms']=self.matched_terms(p)
-        return self.call(profile['id'],source,request_key,'translate',p['id'])
-    def review(self,p,request_key):
-        profile=self.resolve('review')
+        return self.call(profile['id'],source,request_key,'translate',p['id'],expected_revision=snapshot['revision'])
+    def review(self,p,request_key,route_snapshot=None):
+        snapshot=route_snapshot or self.route_snapshot('review')
+        profile=self.get(snapshot['profile_id'])
+        if profile['revision']!=snapshot['revision']:
+            raise Problem('已确认的模型配置已变化，未调用模型；请核对配置并重新安排',409)
         source={k:p.get(k) for k in ('title_zh','facts','brand','source_sku',*CONTENT_FIELDS)}
         source['preferred_terms']=self.matched_terms(p)
-        return self.call(profile['id'],source,request_key,'review',p['id'])
+        return self.call(profile['id'],source,request_key,'review',p['id'],expected_revision=snapshot['revision'])

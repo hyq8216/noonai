@@ -636,8 +636,86 @@ raise SystemExit('the simulated in-flight automation call did not stop')
         self.model('primary');fallback=self.model('fallback');p=self.product();rid=self.create(p,{'translate':True});self.tick()
         with patch('models.request_json',side_effect=Problem('service unavailable',502)):self.tick()
         i=self.item(rid);self.assertEqual(i['status'],'attention');self.auto.control({'action':'retry_fallback','item_id':i['id'],'revision':p['revision']})
+        replacement=self.app.models.save({'name':'QA later fallback','provider':'openai','model':'gpt-6-sol',
+            'api_key':'test-only','enabled':True,'input_price':'.1','output_price':'.5','daily_usd':'1'})['id']
+        self.app.models.route({'role':'fallback','profile_id':replacement})
         with patch('models.request_json',return_value=response()):self.tick()
         self.assertEqual(self.item(rid)['step'],2);self.assertEqual(self.app.models.state()['calls'][0]['profile_id'],fallback)
+    def test_campaign_keeps_confirmed_model_route_when_queued_work_starts_later(self):
+        p=self.product();primary=self.model('primary')
+        replacement=self.app.models.save({'name':'QA replacement','provider':'openai','model':'gpt-6-sol',
+            'api_key':'test-only','enabled':True,'input_price':'.1','output_price':'.5','daily_usd':'1'})['id']
+        self.model('review')
+        body={'product_ids':[p['id']],'plan':{'translate':True,'review':False},
+            'name':'Queued route snapshot QA','request_id':'queued-route-snapshot','confirmed':True}
+        preview=self.app.catalog_campaign.preview(body)
+        queued=self.app.catalog_campaign.apply({**body,'preview_token':preview['token']})
+        run_id=queued['runs'][0]['id']
+        self.tick()  # Finish the non-billable source step before the model step.
+        self.app.models.route({'role':'primary','profile_id':replacement})
+        with patch('models.request_json',return_value=response()):self.tick()
+        calls=self.app.models.state()['calls']
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0]['profile_id'],primary,
+                         'a queued campaign must use the model route the user confirmed')
+        self.assertEqual(next(i for i in self.auto.state()['items'] if i['run_id']==run_id)['step'],2)
+    def test_campaign_keeps_confirmed_review_route_when_review_starts_later(self):
+        p=self.product();primary=self.model('primary');review=self.model('review')
+        replacement=self.app.models.save({'name':'QA replacement review','provider':'openai','model':'gpt-6-sol',
+            'api_key':'test-only','enabled':True,'input_price':'.1','output_price':'.5','daily_usd':'1'})['id']
+        body={'product_ids':[p['id']],'plan':{'translate':True,'review':True},
+            'name':'Queued review route snapshot QA','request_id':'queued-review-route-snapshot','confirmed':True}
+        preview=self.app.catalog_campaign.preview(body)
+        queued=self.app.catalog_campaign.apply({**body,'preview_token':preview['token']})
+        self.tick()  # Source validation.
+        self.app.models.route({'role':'primary','profile_id':replacement})
+        with patch('models.request_json',return_value=response()):self.tick()
+        self.app.models.route({'role':'review','profile_id':replacement})
+        with patch('models.request_json',return_value=response({'passed':True,'warnings':[]})):self.tick()
+        calls=self.app.models.state()['calls']
+        self.assertEqual({call['profile_id'] for call in calls},{primary,review})
+        item=next(i for i in self.auto.state()['items'] if i['run_id']==queued['runs'][0]['id'])
+        self.assertEqual(item['step'],3)
+    def test_changed_confirmed_profile_is_not_called_and_explicit_retry_reconfirms(self):
+        p=self.product();primary=self.model('primary')
+        body={'product_ids':[p['id']],'plan':{'translate':True},'name':'Changed profile QA',
+            'request_id':'changed-profile-retry','confirmed':True}
+        preview=self.app.catalog_campaign.preview(body)
+        run=self.app.catalog_campaign.apply({**body,'preview_token':preview['token']})['runs'][0]
+        self.tick()
+        profile=self.app.models.get(primary)
+        self.app.models.save({**profile,'name':'QA primary edited','revision':profile['revision']})
+        with patch('models.request_json') as request:
+            self.tick()
+            request.assert_not_called()
+        item=self.item(run['id'])
+        self.assertEqual(item['status'],'attention')
+        self.assertEqual(item['message'],'已确认的模型配置已变化，未调用模型；请核对配置并重新安排')
+        self.assertEqual(self.app.models.state()['calls'],[])
+        self.auto.control({'action':'retry','item_id':item['id'],'revision':p['revision']})
+        with patch('models.request_json',return_value=response()):self.tick()
+        call_state=self.app.models.state()['calls']
+        self.assertTrue(call_state,self.item(run['id']))
+        self.assertEqual(call_state[0]['profile_id'],primary)
+        self.assertEqual(self.item(run['id'])['step'],2)
+    def test_legacy_queued_workflow_requires_explicit_model_route_confirmation(self):
+        p=self.product();primary=self.model('primary');rid=self.create(p,{'translate':True})
+        with self.store.connect() as c:
+            c.execute("UPDATE automation_runs SET plan=json_remove(plan,'$.confirmed_model_routes') WHERE id=?",(rid,))
+        self.tick()  # Source step; this simulates a queued run from an older app version.
+        with patch('models.request_json') as request:
+            self.tick()
+            request.assert_not_called()
+        item=self.item(rid)
+        self.assertEqual(item['status'],'attention')
+        self.assertEqual(item['message'],'此旧流程没有已确认的模型配置，未调用模型；请核对配置后点击重试')
+        self.assertEqual(self.app.models.state()['calls'],[])
+        self.auto.control({'action':'retry','item_id':item['id'],'revision':p['revision']})
+        with patch('models.request_json',return_value=response()):self.tick()
+        call_state=self.app.models.state()['calls']
+        self.assertTrue(call_state,self.item(rid))
+        self.assertEqual(call_state[0]['profile_id'],primary)
+        self.assertEqual(self.item(rid)['step'],2)
     def test_rate_wait_resumes_without_duplicate_call(self):
         pid=self.model();profile=self.app.models.get(pid);self.app.models.save({**profile,'rpm':1})
         with patch('models.request_json',return_value=response()):self.app.models.call(pid,{},'prior')
