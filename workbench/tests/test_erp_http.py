@@ -157,6 +157,48 @@ class ERPHTTPTests(unittest.TestCase):
                 self.request('/api/' + endpoint, {})
             self.assertEqual(blocked.exception.code, 409)
 
+    def test_catalog_diagnostics_are_read_only_and_exports_are_downloadable(self):
+        _, _, products = self.entities_and_product()
+        body = {'name':'合成规格诊断', 'axes':['颜色','尺寸'], 'members':[
+            {'product_id':p['id'],'revision':p['revision'],
+             'values':{'颜色':color,'尺寸':size}}
+            for p,color,size in zip(products, ('黑色','蓝色'), ('小','大'))]}
+        with self.app.store.connect() as c:
+            before = [tuple(r) for r in c.execute('SELECT * FROM products ORDER BY id')]
+        diagnosis = self.request('/api/catalog-groups/diagnose', body)
+        self.assertIsInstance(diagnosis, dict)
+        self.assertEqual(self.request('/api/catalog-groups/state')['rows'], [])
+        preview = self.request('/api/catalog-groups/preview', body)
+        self.request('/api/catalog-groups/save', {**body,'preview_digest':preview['preview_digest'],
+            'confirmed':True,'request_id':'http-deep-group-save'})
+        gid = self.request('/api/catalog-groups/state')['rows'][0]['id']
+        data, headers = self.request('/api/catalog-groups/export?id='+gid, raw=True)
+        self.assertTrue(data.startswith(b'\xef\xbb\xbf'))
+        self.assertIn('text/csv',headers['Content-Type'])
+        self.assertIn("filename*=UTF-8''",headers['Content-Disposition'])
+        with self.app.store.connect() as c:
+            self.assertEqual([tuple(r) for r in c.execute('SELECT * FROM products ORDER BY id')], before)
+        with self.assertRaises(HTTPError) as unauthorized:
+            self.request('/api/catalog-groups/diagnose', body, authenticated=False)
+        self.assertEqual(unauthorized.exception.code,403)
+        self.app.recovery.pending.write_text('{}')
+        with self.assertRaises(HTTPError) as blocked:
+            self.request('/api/catalog-groups/diagnose', body)
+        self.assertEqual(blocked.exception.code,409)
+
+    def test_alert_filter_validation_and_csv_download_use_server_routes(self):
+        state = self.request('/api/alerts/state?severity=warning&sort=severity&mode=open')
+        self.assertTrue(all(r['severity']=='warning' and r['mode']=='open' for r in state['rows']))
+        data,headers = self.request('/api/alerts/export?severity=warning&mode=open',raw=True)
+        self.assertTrue(data.startswith(b'\xef\xbb\xbf'))
+        self.assertIn('text/csv',headers['Content-Type'])
+        self.assertIn("filename*=UTF-8''",headers['Content-Disposition'])
+        for query in ('severity=invalid','sort=invalid','mode=invalid'):
+            for route in ('state','export'):
+                with self.subTest(route=route,query=query),self.assertRaises(HTTPError) as invalid:
+                    self.request('/api/alerts/'+route+'?'+query)
+                self.assertEqual(invalid.exception.code,400)
+
     def manual_order(self, shop, warehouse, product, quantity=1):
         return self.request('/api/ops/order', {'shop_id':shop['id'], 'warehouse_id':warehouse['id'],
             'external_id':'SYNTHETIC-ERP-ORDER', 'currency':'SAR', 'request_id':'erp-http-manual-order',

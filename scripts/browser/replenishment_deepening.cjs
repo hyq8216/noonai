@@ -1,0 +1,31 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {runWorkflow}=require('./harness.cjs');
+runWorkflow('replenishment transfer/order conservation, risk filters and full safe CSV',async({page,call,navigate,settle,mobile})=>{
+ const imp=await call('/api/import',{products:[{title_zh:'=深化浏览器测试',source_sku:'DEEP-R'},...Array.from({length:53},(_,i)=>({title_zh:'深化未知'+i,source_sku:'DEEP-U'+i}))]});const pid=imp.created[0];
+ let seq=0;const op=(action,b)=>call('/api/ops/'+action,{...b,request_id:'deep-r-'+(++seq)});
+ const wh=await op('entity',{kind:'warehouse',name:'深化目标仓'}),src=await op('entity',{kind:'warehouse',name:'深化调出仓'}),shop=await op('entity',{kind:'shop',name:'深化店'});
+ await op('adjust',{product_id:pid,warehouse_id:wh.id,quantity:10,direction:'in',reason:'合成库存'});
+ await op('adjust',{product_id:pid,warehouse_id:src.id,quantity:6,direction:'in',reason:'合成调出库存'});
+ let t=await op('transfer',{source_warehouse_id:src.id,warehouse_id:wh.id,lines:[{product_id:pid,quantity:6}],note:'合成调拨'});
+ t=await op('transfer_dispatch',{id:t.id,revision:t.revision,evidence:'合成出库'});
+ let o=await op('order',{shop_id:shop.id,warehouse_id:wh.id,external_id:'=合成未占用需求',currency:'SAR',lines:[{product_id:pid,quantity:4,unit_price:'1'}]});
+ await navigate('replenishment');await page.locator('#replenishment-warehouse').selectOption(wh.id);await page.locator('#replenishment-search').fill('=深化浏览器测试');await page.locator('#replenishment-filter button').click();await settle();
+ assert.ok((await page.locator('#main').innerText()).includes('预计净库存'));await page.locator('[data-replenishment-edit]').click();
+ for(const [key,v] of [['minimum','12'],['target','30'],['lead_days','7']])await page.locator('#replenishment-'+key).fill(v);
+ await page.locator('#replenishment-preview').click();await settle();
+ let v=await page.evaluate(()=>replenishmentPreview);assert.deepEqual([v.available,v.transfer_pending,v.unreserved_demand,v.projected,v.quantity],[10,6,4,12,18]);
+ // Cancel changes demand without a stock movement; the source preview must still fail.
+ await page.locator('#replenishment-confirm').check();o=await op('cancel',{id:o.id,revision:o.revision,reason:'合成取消需求'});
+ const stale=page.waitForResponse(r=>r.url().endsWith('/api/replenishment/apply')&&r.request().method()==='POST');await page.locator('#replenishment-apply').click();assert.equal((await stale).status(),409);await settle();assert.equal(await page.locator('#replenishment-preview-panel').count(),0);
+ await page.locator('#replenishment-preview').click();await settle();v=await page.evaluate(()=>replenishmentPreview);assert.equal(v.quantity,14);
+ await mobile();await page.locator('#replenishment-confirm').check();await page.locator('#replenishment-apply').click();await settle();
+ t=await op('transfer_receive',{id:t.id,revision:t.revision,quantities:{[pid]:2},evidence:'合成部分到仓'});
+ await page.locator('#replenishment-refresh').click();await settle();const r=await page.evaluate(()=>state.replenishment.rows[0]);assert.deepEqual([r.available,r.transfer_pending,r.unreserved_demand,r.projected,r.quantity],[12,4,0,16,14]);
+ await page.locator('#replenishment-search').fill('');await page.locator('#replenishment-risk').selectOption('unknown');await page.locator('#replenishment-filter button').click();await settle();assert.equal(await page.locator('[data-replenishment-edit]').count(),50);
+ await page.locator('[data-replenishment-page="1"]').click();await settle();assert.equal(await page.locator('[data-replenishment-edit]').count(),3);
+ let dl=page.waitForEvent('download');await page.locator('#replenishment-export').click();let bytes=fs.readFileSync(await (await dl).path());assert.equal((bytes.toString().match(/深化未知/g)||[]).length,53);assert.ok(!bytes.toString().includes('深化浏览器测试'));
+ await page.locator('#replenishment-risk').selectOption('');await page.locator('#replenishment-suggestion').selectOption('needed');await page.locator('#replenishment-filter button').click();await settle();assert.equal(await page.locator('[data-replenishment-edit]').count(),1);
+ dl=page.waitForEvent('download');await page.locator('#replenishment-export').click();bytes=fs.readFileSync(await (await dl).path());assert.ok(bytes.toString().includes("'=深化浏览器测试"));assert.ok(bytes.toString().includes("'=合成未占用需求"));assert.ok(bytes.toString().includes(t.id));assert.ok(bytes.toString().includes('调拨依据'));
+ await mobile();const snap=await call('/api/state?surface=purchases');assert.equal(snap.ops.documents.filter(d=>d.kind==='purchase').length,0);
+});

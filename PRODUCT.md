@@ -14,3 +14,6 @@ macOS desktop first; embedded local web interface.
 Python/SQLite本地服务、原生网页界面、Swift/AppKit/WKWebView桌面客户端；内置运行依赖。当前Apple Silicon本地开发构建。
 ## Product Principles
 来源可追溯；未知字段保留待确认；修改后重新审核；账务与库存事务不可重复计入；平台反馈、本地记录和实际可售分开。
+
+## Continued Deepening
+用户要求交给并行子任务继续深化，六个GPT-6.1 Sol medium子任务在现有采集、SPU、供应商报价、补货、分析和异常页面加深可操作业务能力；主任务统一接口与回归验收，见docs/ERP_DEEPENING.md。已交付0.43.0 DMG的真实原生构建证据单独保留，新源码能力不自动等于已安装版本。

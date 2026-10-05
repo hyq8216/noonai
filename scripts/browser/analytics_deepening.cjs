@@ -1,0 +1,37 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {randomUUID}=require('node:crypto');
+const {runWorkflow}=require('./harness.cjs');
+runWorkflow('analytics evidence dates / clipped weeks / original currencies / store filters / mobile CSV',async({page,call,navigate,settle,mobile})=>{
+ const op=(action,body)=>call('/api/ops/'+action,{request_id:randomUUID(),...body});
+ const today=new Date().toISOString().slice(0,10), start=new Date(Date.now()-29*86400000).toISOString().slice(0,10);
+ const shop=await op('entity',{kind:'shop',name:'合成分析深化店'});
+ const other=await op('entity',{kind:'shop',name:'合成分析其他店'});
+ const wh=await op('entity',{kind:'warehouse',name:'合成分析深化仓'});
+ const pid=(await call('/api/import',{products:[{title_zh:'合成分析观测商品',facts:'合成分析证据'}]})).created[0];
+ const order=await op('order',{shop_id:shop.id,warehouse_id:wh.id,external_id:'SYNTHETIC-TREND-A',currency:'SAR',lines:[{product_id:pid,quantity:2,unit_price:'3'}]});
+ await op('order',{shop_id:other.id,warehouse_id:wh.id,external_id:'SYNTHETIC-TREND-B',currency:'USD',lines:[{product_id:pid,quantity:1,unit_price:'2'}]});
+ await op('adjust',{product_id:pid,warehouse_id:wh.id,direction:'in',quantity:5,reason:'合成当前库存'});
+ const fee=await call('/api/finance/entry',{request_id:randomUUID(),kind:'expense',category:'other',currency:'USD',amount:'3',fx:'2',date:today,evidence_key:'synthetic-trend-fee',evidence:'合成原币凭证'});
+ await call('/api/finance/allocate',{request_id:randomUUID(),id:fee.id,revision:fee.revision,allocations:[{order_id:order.id,amount:'1'}]});
+ await navigate('analytics');await page.locator('#analytics-trends').waitFor();
+ await page.locator('#analytics-from').fill(start);await page.locator('#analytics-to').fill(today);
+ await page.locator('#analytics-shop').selectOption(shop.id);await page.locator('#analytics-warehouse').selectOption(wh.id);
+ await page.locator('#analytics-filter button').click();await page.waitForFunction(id=>state.analytics.filters.shop_id===id,shop.id);await settle();
+ assert.equal(await page.evaluate(()=>state.analytics.trends.current.created_orders),1);
+ assert.equal(await page.evaluate(()=>state.analytics.trends.current.finance_currencies.USD.expense_cents),100);
+ assert.match(await page.locator('#main').innerText(),/观测期内无发货/);
+ assert.match(await page.locator('#analytics-trends').innerText(),/零基期，变化比例未知/);
+ await page.locator('#analytics-trend-period').selectOption('daily');await settle();
+ assert.equal(await page.locator('#analytics-trend-table tbody tr').count(),30);
+ await mobile();
+ const downloadPromise=page.waitForEvent('download');await page.locator('#analytics-export').click();const download=await downloadPromise;
+ const bytes=fs.readFileSync(await download.path());assert.deepEqual([...bytes.subarray(0,3)],[239,187,191]);
+ const csv=bytes.toString('utf8');assert.match(csv,/daily/);assert.match(csv,/weekly/);assert.match(csv,/原币上期对比,USD,expense_cents,100,0,100,/);
+ assert.match(csv,/观测期内无发货/);assert.match(csv,/非库龄或历史周转/);
+ // Remove store filter and confirm the global unallocated amount returns once.
+ await page.locator('#analytics-shop').selectOption('');await page.locator('#analytics-warehouse').selectOption('');
+ await page.locator('#analytics-filter button').click();await page.waitForFunction(()=>state.analytics.filters.shop_id==='');await settle();
+ assert.equal(await page.evaluate(()=>state.analytics.trends.current.created_orders),2);
+ assert.equal(await page.evaluate(()=>state.analytics.trends.current.finance_currencies.USD.expense_cents),300);
+}).catch(error=>{console.error(error);process.exitCode=1});

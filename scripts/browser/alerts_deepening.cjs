@@ -1,0 +1,35 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {randomUUID}=require('node:crypto');
+const {runWorkflow}=require('./harness.cjs');
+
+runWorkflow('alerts priority and disposition depth',async({page,call,navigate,settle,mobile})=>{
+ const external=[];page.on('request',r=>{const u=new URL(r.url());if(['http:','https:'].includes(u.protocol)&&!['localhost','127.0.0.1'].includes(u.hostname))external.push(r.url());});
+ const today=new Date().toISOString().slice(0,10),due=new Date(Date.now()-3*86400000).toISOString().slice(0,10);
+ for(let i=0;i<53;i++)await call('/api/finance/entry',{request_id:randomUUID(),kind:'expense',category:'other',currency:'CNY',amount:'1',fx:'1',date:today,due_date:i===0?due:'',evidence_key:'alerts-depth-'+i,evidence:'合成本地异常核对 '+i});
+ const before=(await call('/api/state?surface=finance')).finance;
+ await navigate('alerts');await page.locator('[data-alert-group="finance"]').click();await settle();
+ await page.waitForFunction(()=>state.alerts?.group==='finance'&&state.alerts.total===54);
+ assert.ok((await page.locator('main').innerText()).includes('优先级依据'));
+ assert.ok((await page.locator('main').innerText()).includes('建议动作'));
+ await page.locator('#alerts-severity').selectOption('warning');await settle();
+ await page.waitForFunction(()=>state.alerts?.severity==='warning'&&state.alerts.rows.length===1);
+ const selected=await page.evaluate(()=>state.alerts.rows[0]);assert.equal(selected.deadline_basis,'recorded_due_date');assert.ok(selected.overdue_seconds>0);
+ assert.deepEqual((await call('/api/alerts/state?group=finance&severity=warning')).severity_counts,{critical:0,warning:1,info:53});
+ await page.locator('#alerts-confirm').check();await page.locator('[data-alert-action="ack"]').click();await settle();
+ await page.waitForFunction(()=>state.alerts?.rows[0]?.mode==='ack');
+ await page.locator('#alerts-mode').selectOption('open');await settle();await page.waitForFunction(()=>state.alerts?.mode==='open'&&state.alerts.total===0);
+ await page.locator('#alerts-mode').selectOption('ack');await settle();await page.waitForFunction(()=>state.alerts?.mode==='ack'&&state.alerts.total===1);
+ await page.locator('#alerts-sort').selectOption('overdue');await settle();await page.waitForFunction(()=>state.alerts?.sort==='overdue');
+ const downloaded=page.waitForEvent('download');await page.locator('#alerts-export').click();const download=await downloaded;const csv=fs.readFileSync(await download.path(),'utf8');
+ assert.equal(download.suggestedFilename(),'本地异常核对.csv');assert.ok(csv.includes(selected.key));assert.ok(csv.includes('优先级依据'));assert.equal(csv.trim().split('\n').length,2);
+ await page.locator('#alerts-severity').selectOption('info');await settle();await page.locator('#alerts-mode').selectOption('all');await settle();
+ await page.waitForFunction(()=>state.alerts?.severity==='info'&&state.alerts.total===53);assert.equal(await page.evaluate(()=>state.alerts.rows.length),50);
+ await page.locator('#alerts-next').click();await settle();await page.waitForFunction(()=>state.alerts?.page===1);assert.equal(await page.evaluate(()=>state.alerts.rows.length),3);
+ const allDownload=page.waitForEvent('download');await page.locator('#alerts-export').click();const file=await allDownload;const allCsv=fs.readFileSync(await file.path(),'utf8');assert.equal(allCsv.trim().split('\n').length,54,'exports all filtered rows from page two');
+ await page.locator('#alerts-severity').selectOption('warning');await settle();await page.locator('#alerts-mode').selectOption('ack');await settle();await page.waitForFunction(()=>state.alerts?.total===1&&state.alerts.page===0);
+ await mobile();await page.locator('#alerts-confirm').check();await page.locator('[data-alert-hours="0"]').selectOption('1');await page.locator('[data-alert-action="snooze"]').click();await settle();await page.waitForFunction(()=>state.alerts?.total===0);
+ await page.locator('#alerts-mode').selectOption('snooze');await settle();await page.waitForFunction(()=>state.alerts?.rows[0]?.mode==='snooze');await mobile();
+ const after=(await call('/api/state?surface=finance')).finance;assert.deepEqual(after.entries,before.entries);assert.deepEqual(after.payments,before.payments);assert.deepEqual(after.summary,before.summary);assert.deepEqual(external,[]);
+ console.log('Verified finance 54 exceptions; full SQL severity/mode counts; ack then open/ack/snooze filters; overdue sorting; actual CSV download 1 and 53 filtered rows from page two; mobile snooze; unchanged financial records; zero external requests.');
+}).catch(e=>{console.error(e.stack||e);process.exitCode=1;});

@@ -15,6 +15,47 @@ MAX_BYTES=8*1024*1024
 SECRET_KEYS={'token','accesstoken','refreshtoken','apikey','secret','clientsecret','password','authorization','cookie','cookies','credentials','accesskey','privatekey','session','sessionid','headers','csrf','sign','signature'}
 ITEM_KEYS={'product_id','sku','title','source_url','source_price','source_currency','stock','images','facts','supplier','brand','captured_at','method'}
 
+def quality_diagnostics(row,previous=None,duplicate_row=None):
+    """Read-only diagnoses; unknown observations are never inferred or repaired."""
+    raw=row['raw'];issues=[]
+    def issue(code,field,severity,message,action):
+        issues.append({'code':code,'field':field,'severity':severity,'message':message,'action':action})
+    unknown=[]
+    for field,label,action in (
+        ('source_sku','真实规格货号','根据商品页或供应商规格单人工校对货号并填写依据；缺货号不能创建商品'),
+        ('source_price','网页售价','回到来源页核对单一规格售价；区间价格保持未知，不能当采购成本'),
+        ('stock','可供数量','联系供应商或核对规格数量；有货提示不等于实际数量'),
+        ('supplier','供应商','核对供应商名称后填写人工校对及依据'),
+        ('facts','商品事实','核对材质、颜色、尺寸等规格事实后填写人工校对及依据'),
+        ('images','公开图片引用','回到明确商品页检查公开图片引用；素材权利仍需独立核对')):
+        if raw.get(field) in (None,'',[]):
+            unknown.append(field)
+            issue('missing_'+field,field,'blocker' if field=='source_sku' else 'warning',label+'未知',action)
+    changed=[]
+    if row['status']=='conflict':
+        changed=[{'field':field,'before':previous.get(field),'after':raw.get(field)} for field in raw if previous.get(field)!=raw.get(field)]
+        issue('history_conflict','identity','blocker','同一来源规格已有不同观察','到来源候选比较首个与最新快照，核对后处理冲突；不会覆盖现有商品')
+    if row['status']=='duplicate':
+        issue('duplicate_observation','identity','info','包内重复观察' if duplicate_row else '已有相同来源观察','跳过重复，不增加候选版本；'+(f'本包首次出现于第{duplicate_row}行' if duplicate_row else '历史候选与事实保持不变'))
+    if row['capture']['correction']:
+        issue('manual_correction','capture','info','包含有依据的人工校对','核对校对前后值及依据；原始网页观察独立保存')
+    return {'issues':issues,'unknown_fields':unknown,'changed_fields':changed,'duplicate_of_row':duplicate_row,
+            'source':{'provider_product_id':raw['external_product_id'],'url':raw['source_url'],'method':row['capture']['method'],'observed_sku':row['capture']['sku'],'effective_sku':raw['source_sku']},
+            'requires_attention':any(i['severity'] in ('blocker','warning') for i in issues)}
+
+def quality_summary(rows,warnings):
+    by_code={};unknown={};methods={}
+    for row in rows:
+        quality=row['quality']
+        for issue in quality['issues']:by_code[issue['code']]=by_code.get(issue['code'],0)+1
+        for field in quality['unknown_fields']:unknown[field]=unknown.get(field,0)+1
+        method=quality['source']['method'];methods[method]=methods.get(method,0)+1
+    return {'total_rows':len(rows),'unique_products':len({r['raw']['external_product_id'] for r in rows}),
+            'unique_identities':len({r['identity'] for r in rows}),
+            'attention_rows':sum(r['quality']['requires_attention'] for r in rows),
+            'blocked_rows':sum(any(i['severity']=='blocker' for i in r['quality']['issues']) for r in rows),
+            'by_code':by_code,'unknown_fields':unknown,'methods':methods,'package_warnings':list(warnings)}
+
 def secret_key(value):
     value=re.sub('[^a-z0-9]','',value.lower())
     return value in SECRET_KEYS or value.endswith('signature') or bool(re.search('token|cookie|auth|secret|session|password|credential|csrf',value))
@@ -106,7 +147,7 @@ class DomesticCapture:
                 if re.search(r'(?i)(?:cookie|authorization|auth|secret|password|credentials|(?:access[_ -]?|refresh[_ -]?)?token|api[_ -]?key|session[_ -]?(?:id|token)|csrf(?:[_ -]?token)?)\s*[:=]|bearer\s+[A-Za-z0-9_.-]{8,}',value):raise Problem('人工校对值与依据不能包含凭据或登录会话')
             if not any(field in correction for field in ('sku','supplier','facts')):raise Problem('请选择至少一个人工校对字段')
             correction_map[row]=correction
-        rows=[];seen={}
+        rows=[];seen={};first_rows={}
         for index,item in enumerate(items):
             if not isinstance(item,dict) or set(item)-ITEM_KEYS:raise Problem('采集记录存在不支持字段')
             if len(json.dumps(item,ensure_ascii=False).encode())>128*1024:raise Problem('单条采集观察最多128KB')
@@ -151,8 +192,10 @@ class DomesticCapture:
             seen[identity]=digest([raw,normalized])
             missing=[label for field,label in (('source_sku','规格货号'),('source_price','网页售价'),('stock','可供数量')) if raw.get(field) in (None,'')]
             rows.append({'row':index+1,'identity':identity,'status':status,'reason':reason,'raw':raw,'normalized':normalized,'missing':missing,'old_id':old['id'] if old else None,'old_revision':old['revision'] if old else None,'capture':{'captured_at':timestamp(item.get('captured_at',captured)),'method':method,'product_id':pid,'sku':original_raw['source_sku'],'source_url':url,'original_raw':original_raw,'correction':{'fields':changes,'evidence':correction['evidence'].strip(),'manual':True} if correction else None}})
+            rows[-1]['quality']=quality_diagnostics(rows[-1],json.loads(old['snapshots'])[-1]['raw'] if old else None,first_rows.get(identity))
+            first_rows.setdefault(identity,index+1)
         counts={status:sum(r['status']==status for r in rows) for status in ('new','blocked','conflict','duplicate')}
-        return {'token':digest([account['id'],account['revision'],package,corrections,rows]),'provider':provider,'account_id':account['id'],'account_revision':account['revision'],'rows':rows,'counts':counts,'captured_at':captured}
+        return {'token':digest([account['id'],account['revision'],package,corrections,rows]),'provider':provider,'account_id':account['id'],'account_revision':account['revision'],'rows':rows,'counts':counts,'quality_summary':quality_summary(rows,warnings),'captured_at':captured}
 
     def preview(self,body):
         if not isinstance(body,dict):raise Problem('采集预检参数无效')

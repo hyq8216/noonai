@@ -1,0 +1,77 @@
+{
+  "synthetic_only": true,
+  "products": 10000,
+  "stock_rows": 10000,
+  "open_purchases": 100,
+  "quote_members": 100,
+  "quote_suppliers": 10,
+  "quote_rows": 1000,
+  "fx_versions": 61,
+  "manual_replenishment_rules": 5,
+  "measurements": [
+    {
+      "name": "replenishment_needed_filter_5_of_10000",
+      "best_ms": 15708.651,
+      "samples_ms": [
+        15765.789,
+        15860.438,
+        15708.651
+      ],
+      "json_encode_best_ms": 0.107,
+      "json_bytes": 15223,
+      "returned_rows": 5
+    },
+    {
+      "name": "replenishment_50_of_10000",
+      "best_ms": 135.196,
+      "samples_ms": [
+        135.196,
+        146.927,
+        137.645
+      ],
+      "json_encode_best_ms": 0.543,
+      "json_bytes": 109825,
+      "returned_rows": 50
+    },
+    {
+      "name": "supplier_quote_compact_1000_quotes",
+      "best_ms": 97.995,
+      "samples_ms": [
+        116.476,
+        97.995,
+        120.844
+      ],
+      "json_encode_best_ms": 0.116,
+      "json_bytes": 13924,
+      "returned_rows": 1
+    },
+    {
+      "name": "supplier_quote_explicit_detail_1000_quotes",
+      "best_ms": 19.974,
+      "samples_ms": [
+        20.487,
+        20.636,
+        19.974
+      ],
+      "json_encode_best_ms": 6.031,
+      "json_bytes": 1479724,
+      "returned_rows": 1000
+    },
+    {
+      "name": "fx_history_50_of_61",
+      "best_ms": 0.678,
+      "samples_ms": [
+        0.776,
+        1.054,
+        0.678
+      ],
+      "json_encode_best_ms": 0.156,
+      "json_bytes": 29520,
+      "returned_rows": 50
+    }
+  ],
+  "basis": "Best of three local calls, encoding separate; no tracemalloc. Synthetic unknown quotes remain drafts. No images, account access, service-level or multi-user guarantee.",
+  "external_connector_calls": 0,
+  "network_connect_calls": 0,
+  "elapsed_seconds": 94.061
+}

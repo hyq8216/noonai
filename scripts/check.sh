@@ -27,3 +27,8 @@ node scripts/browser/domestic_sources.cjs
 node scripts/browser/supplier_quotes.cjs
 node scripts/browser/fx_registry.cjs
 node scripts/browser/replenishment.cjs
+
+# Integrated deepening workflows use synthetic temporary workspaces.
+for workflow in domestic_capture catalog_groups supplier_quotes replenishment analytics alerts; do
+  node "scripts/browser/${workflow}_deepening.cjs"
+done

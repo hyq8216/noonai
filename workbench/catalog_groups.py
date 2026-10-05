@@ -1,4 +1,8 @@
 """Local SPU organization of independent SKUs; no Noon variation publishing."""
+import csv
+import io
+import itertools
+import math
 import hashlib
 import json
 import re
@@ -46,20 +50,105 @@ class CatalogGroups:
             if parent:return {'source_channel':provenance.get('provider',''),'account_id':provenance.get('account_id',''),'source_parent_id':parent,'requires_confirmation':True}
         return None
 
+    def quality(self,c,group,saved=False):
+        axes=group['axes'];members=group['members'];issues=[];axis_values={a:set() for a in axes};occupied={}
+        def issue(code,message,pid='',severity='error'):
+            issues.append(dict(code=code,message=message,product_id=pid,severity=severity))
+        brands=set();categories=set()
+        if not members:issue('empty_group','请选择独立SKU后核对规格')
+        seen=set();ids=[m.get('product_id') for m in members if isinstance(m.get('product_id'),str)]
+        products={r['id']:r for r in c.execute('SELECT * FROM products WHERE id IN ('+','.join('?' for _ in ids)+')',ids)} if ids else {}
+        assignments={r['product_id']:r['group_id'] for r in c.execute('SELECT * FROM catalog_group_members WHERE product_id IN ('+','.join('?' for _ in ids)+')',ids)} if ids else {}
+        for m in members:
+            pid=m.get('product_id','');values=m.get('values') or {};valid=True
+            if pid in seen:issue('duplicate_member','同一SKU重复出现，请移除重复成员',pid)
+            seen.add(pid)
+            for axis in axes:
+                value=values.get(axis)
+                if not isinstance(value,str) or not value.strip():issue('missing_axis_value','补充规格值：'+axis,pid);valid=False
+                else:axis_values[axis].add(value.strip())
+            if set(values)-set(axes):issue('extra_axis_value','存在未使用的规格字段，请重新核对规格轴',pid)
+            if valid:
+                combo=tuple(values[a].strip() for a in axes)
+                occupied.setdefault(combo,[]).append(pid)
+            product=products.get(pid)
+            if not product:issue('missing_product','成员商品不存在，请移除或恢复商品',pid);continue
+            data=json.loads(product['data']);brands.add(data.get('brand',''));categories.add(data.get('category',''));m.update(current_revision=product['revision'],sku=data.get('partner_sku',''),title=data.get('title_zh',''))
+            if product['revision']!=m.get('revision'):issue('revision_changed','商品版本已变化，请重新复核当前事实',pid)
+            if m.get('facts_digest') and self.snapshot(product,data)!=m['facts_digest']:issue('facts_changed','商品身份或事实已变化，请重新复核',pid)
+            for field,label in (('brand','品牌'),('category','类目')):
+                if not data.get(field):issue('missing_'+field,'商品'+label+'待补充，请在商品流程核对',pid,'warning')
+                elif field in group and data.get(field)!=group[field]:issue(field+'_mismatch','当前'+label+'与分组不一致，请在商品流程核对',pid)
+            assigned=assignments.get(pid)
+            if assigned and assigned!=group.get('id'):issue('other_group','SKU归属其他组，请核对本地归属',pid)
+            elif saved and not assigned:issue('missing_membership','成员归属索引缺失，请重新复核保存本地组',pid)
+        if len(brands)>1:issue('mixed_brands','成员当前品牌不一致，请在商品流程核对')
+        if len(categories)>1:issue('mixed_categories','成员当前类目不一致，请在商品流程核对')
+        for combo,pids in occupied.items():
+            if len(pids)>1:issue('duplicate_combination','规格组合重复：'+' / '.join(combo)+'；请调整规格或移除成员',pids[0])
+        if saved:
+            indexed={r[0] for r in c.execute('SELECT product_id FROM catalog_group_members WHERE group_id=?',(group['id'],))}
+            for pid in sorted(indexed-set(ids)):issue('extra_membership','归属索引存在组内未记录SKU，请重新复核保存本地组',pid)
+        values={a:sorted(v) for a,v in axis_values.items()};expected=math.prod(len(v) for v in values.values())
+        missing=max(0,expected-len(occupied));matrix=[]
+        for combo in itertools.islice(itertools.product(*(values[a] for a in axes)),200):
+            pids=occupied.get(combo,[]);matrix.append(dict(values=dict(zip(axes,combo)),product_ids=pids,status='duplicate' if len(pids)>1 else 'present' if pids else 'missing'))
+        if missing:issue('combination_gap',str(missing)+'个观测规格组合未有SKU；请人工确认是否有意不供货，不会自动生成SKU','', 'warning')
+        return dict(issues=issues,error_count=sum(i['severity']=='error' for i in issues),warning_count=sum(i['severity']=='warning' for i in issues),axes=values,expected_combinations=expected,occupied_combinations=len(occupied),missing_combinations=missing,coverage=round(len(occupied)/expected,4) if expected else 0,matrix=matrix,matrix_limit=200,matrix_truncated=expected>200,basis='observed_axis_values',message='按本组已填写规格值推算组合；缺组合仅提示，不代表供应商承诺供货，不会自动生成SKU或发布Noon')
+
     def unpack(self,c,row):
         group=json.loads(row['data']);group.update(id=row['id'],revision=row['revision'],updated_at=row['updated_at'])
-        changed=[]
-        ids=[m['product_id'] for m in group['members']]
-        products={r['id']:r for r in c.execute('SELECT * FROM products WHERE id IN ('+','.join('?' for _ in ids)+')',ids)} if ids else {}
+        group['quality']=self.quality(c,group,True)
+        changed=sorted({i['product_id'] for i in group['quality']['issues'] if i['severity']=='error' and i['product_id']})
         for member in group['members']:
-            product=products.get(member['product_id'])
-            if not product:
-                member['missing']=True;changed.append(member['product_id']);continue
-            data=json.loads(product['data'])
-            member.update(current_revision=product['revision'],sku=data.get('partner_sku',''),title=data.get('title_zh',''))
-            if product['revision']!=member['revision'] or self.snapshot(product,data)!=member['facts_digest']:changed.append(member['product_id'])
-        group.update(review_required=bool(changed),changed_product_ids=changed,connection='local_only',noon_variants_published=False)
+            if 'current_revision' not in member:member['missing']=True
+        group.update(review_required=bool(group['quality']['error_count']),changed_product_ids=changed,connection='local_only',noon_variants_published=False)
         return group
+
+    def diagnose(self,body):
+        if not isinstance(body,dict):raise Problem('分组格式无效')
+        allowed={'id','revision','name','source_channel','source_parent_id','axes','members'}
+        if set(body)-allowed:raise Problem('分组包含未知字段')
+        for field,limit in (('name',200),('source_channel',200),('source_parent_id',500)):
+            if field in body:text(body[field],field,True,limit)
+        if body.get('id') is not None:text(body['id'],'分组编号',limit=96)
+        axes=body.get('axes');members=body.get('members')
+        if not isinstance(axes,list) or not 1<=len(axes)<=3:raise Problem('需要1至3个规格轴')
+        axes=[text(a,'规格轴',limit=60) for a in axes]
+        if len(set(axes))!=len(axes):raise Problem('规格轴不能重复')
+        if not isinstance(members,list) or len(members)>100:raise Problem('每组最多100个SKU')
+        for m in members:
+            if not isinstance(m,dict) or not isinstance(m.get('product_id'),str) or not isinstance(m.get('values',{}),dict):raise Problem('成员格式无效')
+            if set(m)-{'product_id','revision','values','facts_digest'}:raise Problem('成员包含未知字段')
+            text(m['product_id'],'商品编号',limit=96)
+            if type(m.get('revision')) is not int or m['revision']<1:raise Problem('商品版本格式无效')
+            if m.get('facts_digest') is not None and (not isinstance(m['facts_digest'],str) or not re.fullmatch(r'[a-f0-9]{64}',m['facts_digest'])):raise Problem('商品事实摘要格式无效')
+            if len(m.get('values',{}))>3 or any(not isinstance(k,str) or len(k)>60 for k in m.get('values',{})):raise Problem('规格字段格式无效')
+            if any(not isinstance(v,str) or len(v)>100 for v in m.get('values',{}).values()):raise Problem('规格值格式无效')
+        group={**body,'axes':axes,'members':[dict(m) for m in members]}
+        with self.store.connect() as c:
+            c.execute('BEGIN');return dict(quality=self.quality(c,group),connection='local_only',noon_variants_published=False)
+
+    def export_csv(self,group_id):
+        with self.store.connect() as c:
+            c.execute('BEGIN');row=c.execute('SELECT * FROM catalog_groups WHERE id=?',(text(group_id,'分组编号'),)).fetchone()
+            if not row:raise Problem('分组不存在',404)
+            group=self.unpack(c,row)
+        out=io.StringIO();writer=csv.writer(out)
+        def safe(value):
+            value=str(value if value is not None else '')
+            return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n')) else value
+        def write(row):writer.writerow([safe(v) for v in row])
+        write(['本地规格组质检','组名',group['name'],'组编号',group['id'],'组版本',group['revision'],'未发布Noon'])
+        write(['口径',group['quality']['message']]);write(['组合总数',group['quality']['expected_combinations'],'缺口',group['quality']['missing_combinations'],'矩阵最多导出',200])
+        write(['类型','SKU/商品编号','绑定版本','当前版本',*group['axes'],'诊断'])
+        for m in group['members']:
+            reasons='；'.join(i['message'] for i in group['quality']['issues'] if i['product_id']==m['product_id'])
+            write(['成员',m.get('sku') or m['product_id'],m['revision'],m.get('current_revision','已删除'),*(m['values'].get(a,'') for a in group['axes']),reasons])
+        for cell in group['quality']['matrix']:
+            write(['矩阵 '+cell['status'],' / '.join(cell['product_ids']),'','',*(cell['values'][a] for a in group['axes']),'缺口仅提示，不自动生成SKU' if cell['status']=='missing' else ''])
+        for i in group['quality']['issues']:write(['诊断',i['product_id'],'','',*('' for _ in group['axes']),i['message']])
+        return '\ufeff'+out.getvalue()
 
     def state(self,page=0,query='',product_page=None):
         if isinstance(page,bool) or not str(page).isdecimal() or int(page)>100000:raise Problem('页码无效')
@@ -122,6 +211,7 @@ class CatalogGroups:
     def preview(self,body):
         with self.store.connect() as c:
             c.execute('BEGIN');group,old,fingerprint=self.prepare(c,body)
+            group['quality']=self.quality(c,{**group,'id':old['id'] if old else None})
             return dict(group=group,preview_digest=fingerprint,revision=old['revision'] if old else 0,connection='local_only',message='仅建立本地SKU父子规格关系；请人工核对来源父商品和规格，不会发布Noon变体')
 
     def mutation(self,action,body):
