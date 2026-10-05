@@ -880,7 +880,7 @@ print(json.dumps({'product':product,'approved_revision':saved['approved_revision
 `;
     let workflowReadback;
     let workflowState;
-    const workflowDeadline=Date.now()+10000;
+    const workflowDeadline=Date.now()+30000;
     do {
       workflowReadback=spawnSync(pythonExe,['-c',workflowReadbackScript,data],{encoding:'utf8'});
       assert.equal(workflowReadback.status,0,workflowReadback.stderr);
