@@ -1306,5 +1306,5 @@ https://github.com/hyq8216/noonai/actions/runs/37092258230
 - 根因：旧 run #98（ID 37265847407）的 backend 成功；真实 Chromium 在自动化收尾阶段读到模型调用已完成、但流程项仍为 queued，10秒等待后误判失败。相同流程的 run #99、#100/#101、#104/#105 与最新 run #109 均成功，属于调度收尾的时序波动。
 - 调整：移除每日 cron，保留 main push、PR 和手动检查；功能分支 push 不再与 PR 重复执行。Chromium 持久化状态轮询从10秒扩大至30秒，并继续对 attention、cancelled 或持续未完成状态失败；保留商品未批准和零Noon写入断言。
 - 本机验证：bash scripts/check.sh 退出0，530项业务测试、隔离启动/重启及桌面/390px真实 Chromium smoke 全部通过。Workflow YAML 解析及 main/PR/manual 无 schedule 触发断言通过。
-- GitHub Actions run #110（ID 37270368131）验证取消每日定时后的工作流配置，backend/browser 均成功。随后 run #111（ID 37270896791）backend 全部通过，但 Chromium 另一处异步页面加载期间侧栏暂时不在 DOM，原导航等待10秒后超时；已将导航活动入口等待增至30秒。修正后的本机真实 Chromium smoke 通过，下一次 PR run 验证云端；PR #6 仍为草稿且未合并。
+- GitHub Actions run #110（ID 37270368131）验证取消每日定时后的工作流配置，backend/browser 均成功。随后 run #111（ID 37270896791）backend 全部通过，但 Chromium 另一处异步页面加载期间侧栏暂时不在 DOM，原导航等待10秒后超时；已将导航活动入口等待增至30秒。修正后的 run #112（ID 37271414234）backend/browser 均成功，完整回归、隔离启动/重启与真实 Chromium smoke 通过；PR #6 仍为草稿且未合并。
 - 邮件边界：每日无改动触发已移除；GitHub 个人通知偏好无法从仓库工作流更改，已投递邮件仍保留在邮箱历史。仅使用合成数据，real_noon_verified=false。
