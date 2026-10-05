@@ -48,8 +48,11 @@ const cases=[
    await popup.waitForFunction(()=>!document.getElementById('capture').disabled,undefined,{timeout:15000});
    const status=await popup.locator('#status').innerText();
    assert.match(status,/已提取/,'Real scripting/download invocation failed: '+status);
-   await popup.waitForFunction(async ids=>(await chrome.downloads.search({})).some(d=>!ids.includes(d.id)&&d.state==='complete'),before,{timeout:15000});
-   const receipt=await popup.evaluate(async ids=>(await chrome.downloads.search({})).find(d=>!ids.includes(d.id)&&d.state==='complete'),before);
+  // Chrome can report `complete` just before exposing the final local path in
+  // downloads.search(). Wait for both fields; otherwise the immediate second
+  // query can race the receipt update on Linux CI.
+  await popup.waitForFunction(async ids=>(await chrome.downloads.search({})).some(d=>!ids.includes(d.id)&&d.state==='complete'&&typeof d.filename==='string'&&d.filename.length>0),before,{timeout:15000});
+  const receipt=await popup.evaluate(async ids=>(await chrome.downloads.search({})).find(d=>!ids.includes(d.id)&&d.state==='complete'&&typeof d.filename==='string'&&d.filename.length>0),before);
    assert.ok(receipt.filename&&fs.existsSync(receipt.filename),'Real chrome.downloads receipt has no saved file');
    assert.ok(receipt.filename.startsWith(downloads+path.sep),'Download escaped the temporary test directory');
    assert.equal(receipt.byExtensionId,extensionId);assert.equal(receipt.error,undefined);

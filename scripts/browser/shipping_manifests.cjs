@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const {randomUUID}=require('node:crypto');
@@ -21,7 +22,7 @@ runWorkflow('物流包装草稿 -> 来源失效 -> 修订防重 -> 实测交接�
   const field=k=>page.locator(`[data-shipping-package="${order.id}"][data-shipping-field="${k}"]`);
   await field('box_no').fill('=SYNTHETIC-BOX');
   for(const [k,v]of [['length_cm','20'],['width_cm','10'],['height_cm','5']])await field(k).fill(v);
-  page.once('dialog',dialog=>dialog.dismiss());await page.locator('.nav [data-nav="orders"]').click();
+  page.once('dialog',dialog=>dialog.dismiss());await clickNavigation(page,'orders');
   assert.equal(await page.evaluate(()=>view),'shipping-manifests');assert.equal(await field('box_no').inputValue(),'=SYNTHETIC-BOX');
   await mobile();
   await page.locator('#shipping-manifest-preview').click();await settle();

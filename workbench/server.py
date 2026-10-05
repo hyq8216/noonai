@@ -175,7 +175,7 @@ class App:
             aid=im.get('media_asset_id')
             if aid:
                 self.visuals.validate_asset(self.media.get(aid),p['id'])
-    def queue(self,pid,kind,revision):
+    def queue(self,pid,kind,revision,confirm_model_retry_after_prior_call=False):
         p=self.store.get(pid)
         config=self.config()
         if kind=='translate' and not config['text_ready']: raise Problem('文字服务尚未接入，请在设置页查看配置方式。双语字段可先手动填写。',409)
@@ -190,13 +190,14 @@ class App:
         if kind=='offers' and p['demo']:raise Problem('示例商品不能读取真实报价',409)
         if kind=='prices' and (p['demo'] or p.get('mode')!='LOCAL'):raise Problem('仅真实且已确认本地模式的商品可读取沙特本地售价',409)
         if kind=='refresh' and not (p.get('platform') or {}).get('sku_parent'): raise Problem('尚无平台商品编号可回查',409)
-        jid=self.store.add_job(pid,kind,revision)
+        jid=self.store.add_job(pid,kind,revision,confirm_model_retry_after_prior_call=confirm_model_retry_after_prior_call)
         self.executor.submit(self.run,jid,p,kind)
         return {'job_id':jid}
     def run(self,jid,p,kind):
         # Claim only pending work. A queued executor callback may already be cancelled.
         with self.store.connect() as c:
-            claimed=c.execute("UPDATE jobs SET status='running',message='正在处理',updated_at=? WHERE id=? AND kind=? AND status='queued'",(now(),jid,kind)).rowcount
+            initial_result=json.dumps({'phase':'preflight'},ensure_ascii=False) if kind=='submit' else None
+            claimed=c.execute("UPDATE jobs SET status='running',message='正在处理',result=coalesce(?,result),updated_at=? WHERE id=? AND kind=? AND status='queued'",(initial_result,now(),jid,kind)).rowcount
         if not claimed:return
         try:
             if kind=='image-host':
@@ -221,6 +222,8 @@ class App:
                     raise Problem('店铺内容提交配置已变化，本次未发送',409)
                 client=Noon(); data=payload(current)
                 preflight_attributes(client.attributes(current['category']),data)
+                # Persist the uncertain-write boundary before crossing into the seller upsert.
+                self.store.job_phase(jid,'submit_dispatching','Noon只读预检已通过；提交请求即将发送，若进程中断需先回查平台')
                 try: result=client.submit(data)
                 except Exception:
                     self.store.job_result(jid,'uncertain','提交请求可能已到达 noon。请先按 SKU 在平台核对，禁止直接重发当前版本')
@@ -260,9 +263,9 @@ class App:
                 self.store.record_platform(p['id'],{**p['platform'],'content_response':result,'checked_at':now(),'live_verified':False},expected_parent=parent)
                 self.store.job_result(jid,'done','已读取内容审核结果；售价、库存及实际可售仍需验证')
         except Problem as e:
-            self.store.job_result(jid,'failed',str(e))
+            self.store.fail_job_safely(jid,str(e))
         except Exception:
-            self.store.job_result(jid,'failed','任务处理失败，资料已保留。请检查服务配置或图片文件。')
+            self.store.fail_job_safely(jid,'任务处理失败，资料已保留。请检查服务配置或图片文件。')
 
     def run_transfer_batch(self,dispatch):
         """Claim selected jobs, then make one NGS read for all still-current SKUs."""
@@ -308,6 +311,10 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def app(self): return self.server.app
     def respond(self,body,status=200,content_type='application/json; charset=utf-8',filename=None):
+        if self.command=='POST' and 200<=status<300:
+            path=urlsplit(self.path).path
+            if path.endswith('/approve') or path=='/api/approval-batch/apply':self.app.automation.wake(approval=True)
+            elif path.startswith(('/api/automation/','/api/models/')):self.app.automation.wake()
         if isinstance(body,(dict,list)): body=json.dumps(body,ensure_ascii=False,allow_nan=False).encode()
         if isinstance(body,str): body=body.encode()
         self.send_response(status)
@@ -546,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(r'[a-f0-9]{32}(?:-source)?\.(jpg|png|webp)',name): raise Problem('图片不存在',404)
                 file=self.app.store.assets/name
             else:
-                name={'/':'index.html','/supplier_quotes.js':'supplier_quotes.js','/fx_registry.js':'fx_registry.js','/replenishment.js':'replenishment.js','/domestic_capture.js':'domestic_capture.js','/inventory_counts.js':'inventory_counts.js','/shipping_manifests.js':'shipping_manifests.js','/pricing_plans.js':'pricing_plans.js','/ad_analytics.js':'ad_analytics.js','/import_profiles.js':'import_profiles.js','/bank_reconciliation.js':'bank_reconciliation.js','/fulfillment.js':'fulfillment.js','/procurement.js':'procurement.js','/after_sales.js':'after_sales.js','/alerts.js':'alerts.js','/batch_editor.js':'batch_editor.js','/order_intake.js':'order_intake.js','/settlement_intake.js':'settlement_intake.js','/catalog_groups.js':'catalog_groups.js','/analytics.js':'analytics.js','/collection_schedules.js':'collection_schedules.js','/backup_schedules.js':'backup_schedules.js','/channels.js':'channels.js','/platform.js':'platform.js','/content_submit_batch.js':'content_submit_batch.js','/catalog.js':'catalog.js','/video_batch.js':'video_batch.js','/source_import.js':'source_import.js','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/operations.js':'operations.js','/media.js':'media.js','/media_import.js':'media_import.js','/automation.js':'automation.js','/visuals.js':'visuals.js','/visual_checks.js':'visual_checks.js','/finance.js':'finance.js','/warehouse.js':'warehouse.js','/stock_plan.js':'stock_plan.js','/recovery.js':'recovery.js','/image_host.js':'image_host.js','/workflow_visual.js':'workflow_visual.js','/approval_batch.js':'approval_batch.js','/batch.js':'batch.js','/category.js':'category.js','/category_batch.js':'category_batch.js','/visual_batch.js':'visual_batch.js'}.get(path)
+                name={'/':'index.html','/supplier_quotes.js':'supplier_quotes.js','/fx_registry.js':'fx_registry.js','/replenishment.js':'replenishment.js','/domestic_capture.js':'domestic_capture.js','/inventory_counts.js':'inventory_counts.js','/shipping_manifests.js':'shipping_manifests.js','/pricing_plans.js':'pricing_plans.js','/ad_analytics.js':'ad_analytics.js','/import_profiles.js':'import_profiles.js','/bank_reconciliation.js':'bank_reconciliation.js','/fulfillment.js':'fulfillment.js','/procurement.js':'procurement.js','/after_sales.js':'after_sales.js','/alerts.js':'alerts.js','/batch_editor.js':'batch_editor.js','/order_intake.js':'order_intake.js','/settlement_intake.js':'settlement_intake.js','/catalog_groups.js':'catalog_groups.js','/analytics.js':'analytics.js','/collection_schedules.js':'collection_schedules.js','/backup_schedules.js':'backup_schedules.js','/channels.js':'channels.js','/platform.js':'platform.js','/content_submit_batch.js':'content_submit_batch.js','/catalog.js':'catalog.js','/video_batch.js':'video_batch.js','/source_import.js':'source_import.js','/navigation.js':'navigation.js','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/operations.js':'operations.js','/media.js':'media.js','/media_import.js':'media_import.js','/automation.js':'automation.js','/visuals.js':'visuals.js','/visual_checks.js':'visual_checks.js','/finance.js':'finance.js','/warehouse.js':'warehouse.js','/stock_plan.js':'stock_plan.js','/recovery.js':'recovery.js','/image_host.js':'image_host.js','/workflow_visual.js':'workflow_visual.js','/approval_batch.js':'approval_batch.js','/batch.js':'batch.js','/category.js':'category.js','/category_batch.js':'category_batch.js','/visual_batch.js':'visual_batch.js'}.get(path)
                 if not name: raise Problem('页面不存在',404)
                 file=BASE/'static'/name
             if not file.is_file(): raise Problem('文件不存在',404)
@@ -662,7 +669,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/platform-batch/cancel':return self.respond(PlatformBatch(self.app,b.get('kind','refresh')).cancel(b.get('request_id')))
             if path.startswith('/api/content-submit-batch/'):
                 action=path.removeprefix('/api/content-submit-batch/')
-                if action not in ('preview','apply','cancel'):raise Problem('操作不存在',404)
+                if action not in ('preview','apply','cancel','reconcile'):raise Problem('操作不存在',404)
                 batch=ContentSubmitBatch(self.app)
                 return self.respond(getattr(batch,action)(b))
             if path in ('/api/platform-batch/preview','/api/platform-batch/apply'):
@@ -749,7 +756,9 @@ class Handler(BaseHTTPRequestHandler):
                     if url and (parsed.scheme!='https' or not parsed.hostname or parsed.username): raise Problem('成图地址须为公开HTTPS链接')
                     target['public_url']=url
                 return self.respond(store.update(pid,{},revision,{'images':images,'images_verified':False}))
-            return self.respond(self.app.queue(pid,action,revision),202)
+            confirm_model_retry=b.get('confirm_model_retry_after_prior_call',False)
+            if type(confirm_model_retry) is not bool:raise Problem('模型重试确认资料无效')
+            return self.respond(self.app.queue(pid,action,revision,confirm_model_retry_after_prior_call=confirm_model_retry),202)
         except Problem as e: self.respond({'error':str(e)},e.status)
         except Exception: self.respond({'error':'本地操作失败，请检查输入后重试；已保存的数据仍然保留'},500)
 

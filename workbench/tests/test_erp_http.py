@@ -5,11 +5,13 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from core import Problem
 from server import App, Handler, LocalHTTPServer
 
 
@@ -113,10 +115,13 @@ class ERPHTTPTests(unittest.TestCase):
         self.assertEqual(self.request('/api/order-intake/apply', apply), receipt)
         orders = self.request('/api/state?surface=orders')['ops']['documents']
         self.assertEqual(len(orders), 1); self.assertEqual(orders[0]['status'], 'new')
+        # Analytics filters orders by persisted creation day; follow this order's
+        # recorded timestamp instead of a fixed date or a second wall-clock read.
+        business_day = orders[0]['created_at'][:10]
         self.assertEqual(self.request('/api/state?surface=inventory')['ops']['stock'], [])
         batch = self.request('/api/settlements/preview', {'shop_id':shop['id'], 'format':'json',
             'content':json.dumps([{'evidence_key':'synthetic-sale-1','external_id':'SYNTHETIC-001',
-                'category':'sale','currency':'SAR','amount':'25.00','date':'2026-10-03',
+                'category':'sale','currency':'SAR','amount':'25.00','date':business_day,
                 'fx':'1.9','evidence':'合成结算第1行','kind':'income'}])})
         self.assertEqual(batch['summary']['ready'], 1)
         confirm = {'batch_id':batch['id'],'token':batch['token'],
@@ -127,7 +132,7 @@ class ERPHTTPTests(unittest.TestCase):
         with self.app.store.connect() as connection:
             self.assertEqual(connection.execute('SELECT count(*) FROM finance_entries').fetchone()[0], 1)
             self.assertEqual(connection.execute('SELECT count(*) FROM finance_payments').fetchone()[0], 0)
-        report = self.request('/api/analytics/state?from=2026-10-03&to=2026-10-03')
+        report = self.request(f'/api/analytics/state?from={business_day}&to={business_day}')
         self.assertEqual(report['orders']['total'], 1)
         self.assertEqual(report['order_currencies'][0]['currency'], 'SAR')
 
@@ -338,6 +343,72 @@ class ERPHTTPTests(unittest.TestCase):
             self.assertLessEqual(len(page.get('products',page.get('product_changes',[]))),500)
         self.assertEqual(set(cache),set(ids))
         self.assertEqual(cache[changed['id']]['facts'],'黑色；经核对5件装')
+
+    def test_submit_reconciliation_http_route_is_authenticated_and_idempotent(self):
+        pid=self.app.store.import_rows([{'title_zh':'HTTP人工对账合成商品','source_sku':'HTTP-RECON'}])['created'][0]
+        product=self.app.store.get(pid);job_id=self.app.store.add_job(pid,'submit',product['revision'])
+        self.app.store.job_result(job_id,'uncertain','合成丢失响应')
+        body={'request_id':'http-reconcile-once','job_id':job_id,'outcome':'accepted',
+              'note':'合成HTTP测试：SKU回查命中','sku_parent':'HTTP-NOON-QA','confirmed':True}
+        result=self.request('/api/content-submit-batch/reconcile',body)
+        replay=self.request('/api/content-submit-batch/reconcile',body)
+        self.assertEqual(result['job_status'],'needs_attention');self.assertTrue(replay['replayed'])
+        self.assertFalse(result['reconciliation']['live_verified'])
+        self.assertEqual(self.app.store.get(pid)['platform']['sku_parent'],'HTTP-NOON-QA')
+        unauth=Request(self.url+'/api/content-submit-batch/reconcile',headers={'Content-Type':'application/json'},
+                       data=json.dumps({**body,'request_id':'unauth-reconcile'}).encode())
+        with self.assertRaises(HTTPError) as denied:urlopen(unauth,timeout=10)
+        self.assertIn(denied.exception.code,(401,403))
+
+    def test_uncertain_paid_automation_retry_requires_confirmation_over_http(self):
+        profile=self.app.models.save({'name':'HTTP MiniMax plan','provider':'minimax-subscription','model':'MiniMax-M3',
+            'api_key':'sk-cp-http-synthetic','enabled':True})['id']
+        self.app.models.route({'role':'primary','profile_id':profile})
+        pid=self.request('/api/import',{'products':[{'title_zh':'HTTP订阅超时商品','source_sku':'HTTP-MODEL-RETRY',
+            'source_url':'https://example.com/http-model-retry','supplier':'HTTP synthetic supplier','facts':'黑色，1件'}]})['created'][0]
+        run=self.app.automation.create({'request_id':'http-uncertain-model-run','name':'HTTP uncertain model retry',
+            'product_ids':[pid],'plan':{'translate':True}})['id']
+        self.app.automation.tick() # source step
+        with patch('models.request_json',side_effect=Problem('synthetic timeout after dispatch',502)):
+            self.app.automation.tick() # paid model attempt ends with an uncertain receipt
+        item=next(i for i in self.app.automation.state()['items'] if i['run_id']==run)
+        self.assertEqual((item['status'],item['attempt']),('attention',0))
+        def post(body):
+            req=Request(self.url+'/api/automation/control',headers={'Content-Type':'application/json','X-Workbench-Token':self.app.token},
+                        data=json.dumps(body).encode())
+            try:
+                with urlopen(req,timeout=10) as response:return response.status,json.loads(response.read())
+            except HTTPError as error:return error.code,json.loads(error.read())
+        code,denied=post({'item_id':item['id'],'action':'retry','revision':self.app.store.get(pid)['revision']})
+        self.assertEqual(code,409);self.assertIn('可能再次消耗订阅额度',denied['error'])
+        self.assertEqual(next(i for i in self.app.automation.state()['items'] if i['id']==item['id'])['attempt'],0)
+        code,accepted=post({'item_id':item['id'],'action':'retry','revision':self.app.store.get(pid)['revision'],
+                            'confirm_model_retry_after_prior_call':True})
+        self.assertEqual(code,200);self.assertEqual(accepted['id'],item['id'])
+        self.assertEqual(next(i for i in self.app.automation.state()['items'] if i['id']==item['id'])['attempt'],1)
+
+    def test_interrupted_product_translation_retry_requires_confirmation_over_http(self):
+        profile=self.app.models.save({'name':'HTTP translation plan','provider':'minimax-subscription','model':'MiniMax-M3',
+            'api_key':'sk-cp-http-translation','enabled':True})['id']
+        self.app.models.route({'role':'primary','profile_id':profile})
+        pid=self.request('/api/import',{'products':[{'title_zh':'HTTP翻译重试商品','source_sku':'HTTP-TRANSLATE-RETRY',
+            'source_url':'https://example.com/http-translate-retry','supplier':'HTTP synthetic supplier','facts':'黑色，1件'}]})['created'][0]
+        product=self.app.store.get(pid);old=self.app.store.add_job(pid,'translate',product['revision'])
+        with self.app.store.connect() as c:
+            c.execute("INSERT INTO model_calls(id,request_key,digest,profile_id,profile,product_id,status,reserved_micro,charged_micro,message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                      ('http-synthetic-call','product-job:'+old,'digest',profile,'{}',pid,'uncertain',0,0,'synthetic timeout', '2026-10-04T00:00:00Z','2026-10-04T00:00:00Z'))
+        self.app.store.job_result(old,'interrupted','synthetic restart during model call')
+        path=f'/api/products/{pid}/translate';body={'revision':product['revision']}
+        with patch.object(self.app.executor,'submit') as submit:
+            with self.assertRaises(HTTPError) as rejected:
+                self.request(path,body)
+            self.assertEqual(rejected.exception.code,409)
+            self.assertIn('模型步骤已有调用记录',rejected.exception.read().decode())
+            submit.assert_not_called()
+            accepted=self.request(path,{**body,'confirm_model_retry_after_prior_call':True})
+            self.assertTrue(accepted['job_id']);submit.assert_called_once()
+        with self.app.store.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM events WHERE product_id=? AND action='确认重试模型翻译'",(pid,)).fetchone()[0],1)
 
 
 if __name__ == '__main__':

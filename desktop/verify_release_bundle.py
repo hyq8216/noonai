@@ -59,7 +59,7 @@ def verify(app):
                 for surface in SURFACES:
                     if not isinstance(json.loads(read('/api/' + surface + '/state')), dict):
                         raise RuntimeError('Invalid module response: ' + surface)
-                for name in ('supplier_quotes', 'fx_registry', 'replenishment', 'domestic_capture',
+                for name in ('navigation', 'supplier_quotes', 'fx_registry', 'replenishment', 'domestic_capture',
                              'inventory_counts', 'shipping_manifests', 'pricing_plans', 'ad_analytics', 'import_profiles'):
                     if not read('/' + name + '.js'):
                         raise RuntimeError('Bundled JavaScript is missing: ' + name)
@@ -74,6 +74,17 @@ def verify(app):
                         headers={'Content-Type': 'application/json', 'X-Workbench-Token': token})
                     with opener.open(request, timeout=15) as response:
                         return json.loads(response.read())
+                # Subscription setup must survive freezing without sending a model call.
+                profile_id=post('/api/models/save', {'name':'Synthetic MiniMax subscription',
+                    'provider':'minimax-subscription','model':'MiniMax-M3',
+                    'base_url':'https://api.minimax.cn/v1','api_key':'sk-cp-bundle-synthetic-only',
+                    'enabled':True})['id']
+                model_state=json.loads(read('/api/state?surface=models'))['models']
+                profile=next(p for p in model_state['profiles'] if p['id']==profile_id)
+                if profile['provider']!='minimax-subscription' or profile['context_limit']!=512000 or not profile['key_present']:
+                    raise RuntimeError('Frozen MiniMax subscription configuration is incomplete.')
+                if model_state['calls'] or 'sk-cp-bundle-synthetic-only' in json.dumps(model_state):
+                    raise RuntimeError('Saving a subscription called a model or leaked its key.')
                 # Exercise the frozen runtime's actual stock/operations code.
                 import uuid
                 def ops(action, **body):

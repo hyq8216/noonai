@@ -2,6 +2,7 @@ import unittest,json
 from unittest.mock import patch,Mock
 import test_image_host as fixtures
 from core import Problem
+from image_host import PublicObjectMissing
 class WorkflowHostTests(unittest.TestCase):
  setUp=fixtures.ImageHostTests.setUp
  tearDown=fixtures.ImageHostTests.tearDown
@@ -26,6 +27,36 @@ class WorkflowHostTests(unittest.TestCase):
   with patch.object(self.h,'publish',side_effect=Problem('失败')):self.app.run(jid,p,kind)
   self.a.tick();self.assertEqual(self.item()['status'],'attention');self.a.tick();self.assertEqual(self.item()['data']['host_job'],jid)
   self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']});new,_,_=self.dispatch();self.assertNotEqual(new,jid)
+ def test_lost_put_response_reconciles_public_object_before_workflow_retry(self):
+  self.begin();first_job,p,kind=self.dispatch();client=Mock()
+  # The remote store commits the deterministic object, then the client loses its response.
+  client.put_object.side_effect=RuntimeError('synthetic connection lost after remote commit')
+  with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=[PublicObjectMissing('object not visible yet',404),None]) as verify:
+   self.app.run(first_job,p,kind)
+   self.a.tick();self.assertEqual(self.item()['status'],'attention')
+   self.assertEqual(self.s.get(self.pid)['revision'],p['revision'])
+   self.assertFalse(self.s.get(self.pid)['images'][0]['public_url'])
+   self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']})
+   second_job,second_payload,second_kind=self.dispatch();self.assertNotEqual(first_job,second_job)
+   self.app.run(second_job,second_payload,second_kind)
+   self.assertEqual(verify.call_count,2)
+   self.assertEqual(verify.call_args_list[0].args,verify.call_args_list[1].args,
+                    'retry reconciles the same content-addressed public object')
+   client.put_object.assert_called_once()
+  saved=self.s.get(self.pid)
+  self.assertTrue(saved['images'][0]['public_url'].startswith('https://cdn.example.test/noon-images/'))
+  self.assertFalse(saved['images_verified']);self.assertFalse(saved['reviewed'])
+ def test_unavailable_readback_after_uncertain_put_stops_before_another_put(self):
+  self.begin();first_job,p,kind=self.dispatch();client=Mock()
+  client.put_object.side_effect=RuntimeError('synthetic timeout after dispatch')
+  with patch.object(self.h,'client',return_value=client),patch('image_host.verify_public',side_effect=[PublicObjectMissing('not found',404),Problem('read timeout; object state unknown',502)]):
+   self.app.run(first_job,p,kind)
+   self.a.tick();self.assertEqual(self.item()['status'],'attention')
+   self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']})
+   second_job,second_payload,second_kind=self.dispatch()
+   self.app.run(second_job,second_payload,second_kind)
+   self.assertEqual(client.put_object.call_count,1,'unavailable public readback must not trigger another object write')
+   self.assertFalse(self.s.get(self.pid)['images'][0]['public_url'])
  def test_unconfirmed_images_wait_then_resume(self):
   p=self.s.get(self.pid);self.s.update(self.pid,{},p['revision'],{'images_verified':False});self.begin();self.a.tick();self.assertEqual(self.item()['status'],'approval')
   p=self.s.get(self.pid);self.s.update(self.pid,{'images_verified':True},p['revision']);self.a.control({'action':'retry','item_id':self.item()['id'],'revision':self.s.get(self.pid)['revision']});self.assertTrue(self.dispatch())

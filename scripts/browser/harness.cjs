@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -30,8 +31,8 @@ async function runWorkflow(name, workflow) {
     const settle=()=>page.waitForFunction(()=>!busy&&!!document.querySelector('.nav'));
     const call=(route,body)=>page.evaluate(async args=>api(args.route,args.body),{route,body});
     const navigate=async view=>{
-      await settle();await page.locator(`.nav [data-nav="${view}"]`).click();
-      await page.locator(`.nav [data-nav="${view}"][aria-current="page"]`).waitFor();
+      await settle();await clickNavigation(page,view);
+      await page.locator(`.nav [data-nav="${view}"][aria-current="page"]`).waitFor({state:'attached'});
       await page.locator('main h1').waitFor();await settle();
     };
     const mobile=async()=>{

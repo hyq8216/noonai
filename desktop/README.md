@@ -1,8 +1,8 @@
 # Noon Studio for macOS
 
-## 0.43.0：当前ERP版本的DMG构建入口
+## 0.44.0：六模块深化与紧凑导航
 
-当前源码含21个新增模块、40个导航页面，优先1688/淘宝/拼多多采集。0.43.0的arm64 DMG已由真实macOS构建、冻结运行时检查和只读挂载验证生成。下载安装包：[GitHub构建产物](https://github.com/hyq8216/noonai/actions/runs/37114268786/artifacts/11270788090)，解压后使用其中的 `.dmg`。x86_64构建入口已准备，但本次没有生成Intel安装包。下列命令供在Mac自行构建。
+当前源码包含云端六模块深化及40个页面，优先1688/淘宝/拼多多采集。导航改为运营总览及六组可折叠业务菜单，日常铺货入口直接显示，其他入口按二/三级展开。0.44.0 arm64已在真实macOS构建，实际冻结后端、原生WKWebView启动及只读DMG挂载验证通过；本机文件及SHA256见docs/VERIFICATION.md。x86_64入口保留，但本轮未生成Intel包。下列命令供在Mac自行构建。
 
 Mac需安装Python 3.12和Xcode命令行工具。仓库根目录运行：
 
@@ -11,9 +11,9 @@ Mac需安装Python 3.12和Xcode命令行工具。仓库根目录运行：
 ```
 
 脚本安装锁定的运行依赖和PyInstaller，按本机架构构建内置Python/FFmpeg的程序；运行实际冻结后端的隔离业务/扩展/视频检查，通过后创建并只读挂载校验DMG，生成备用ZIP及SHA256。再次覆盖自己已有的同版本输出需明确传 `--overwrite`。
-输出目录：`desktop/dist/0.43.0/arm64/` 或 `desktop/dist/0.43.0/x86_64/`。正常Mac使用不需要安装Python；Python和Xcode仅用于构建。
+输出目录：`desktop/dist/0.44.0/arm64/` 或 `desktop/dist/0.44.0/x86_64/`。正常Mac使用不需要安装Python；Python和Xcode仅用于构建。
 
-安装及升级说明见 [INSTALL-0.43.0.md](INSTALL-0.43.0.md)。本地开发包临时签名，未Apple公证；不会内置账号、浏览器会话或经营资料。
+安装及升级说明见 [INSTALL-0.44.0.md](INSTALL-0.44.0.md)。本地开发包临时签名，未Apple公证；不会内置账号、浏览器会话或经营资料。
 
 仓库提供 `.github/workflows/macos-dmg.yml`，从选定代码分支触发macOS构建并上传安装包artifact，不发布GitHub Release。Runner实际架构由Python探测并记录；下载时核对架构。终端GitHub API访问被网络拒绝，但已连接的GitHub工具可访问仓库；正在通过独立构建分支执行该工作流，确切结果见根目录 docs/VERIFICATION.md。
 

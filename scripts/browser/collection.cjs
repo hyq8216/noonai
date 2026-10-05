@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -34,7 +35,7 @@ const { chromium } = require('playwright');
     page.on('pageerror', error => errors.push(error.message));
     const { url } = JSON.parse(fs.readFileSync(ready));
     await page.goto(url);
-    await page.locator('.nav [data-nav="channels"]').click();
+    await clickNavigation(page,'channels');
     // Foreign connectors are retained for historic records, but are no longer
     // offered by the new-account UI. Seed that legacy record through its API.
     await page.evaluate(async()=>{
@@ -65,6 +66,9 @@ const { chromium } = require('playwright');
     await page.locator('#channel-import-confirm').check();
     await page.locator('#channel-apply').click();
     await page.waitForFunction(async () => (await (await fetch('/api/state')).json()).products.length === 2);
+    // DB visibility can precede the awaited UI refresh. Check the completed receipt,
+    // then keep the original disabled-button and replay assertions intact.
+    await page.waitForFunction(() => !busy && !!channelImportResult);
     products = await page.evaluate(async () => (await (await fetch('/api/state')).json()).products);
     const black = products.find(p => p.source_sku === 'BLACK');
     assert.equal(black.stock, 0); assert.equal(black.cost_cny, null);
@@ -108,7 +112,8 @@ const { chromium } = require('playwright');
     assert.deepEqual(errors, []);
     console.log('PASS synthetic Chromium account save/edit/clear, credential redaction, collection -> preview -> confirmed import, replay, conflict confirmation without product overwrite, stock/currency/provenance and mobile layout; no real account calls');
   } catch (error) {
-    throw new Error(`${error.message}; page errors: ${JSON.stringify(errors)}; fixture errors: ${logs}`);
+    error.message+=`; page errors: ${JSON.stringify(errors)}; fixture errors: ${logs}`;
+    throw error;
   } finally {
     if (browser) await browser.close();
     if (server.exitCode === null) server.kill('SIGTERM');

@@ -1,0 +1,20 @@
+const assert=require('node:assert/strict');
+const {runWorkflow}=require('./harness.cjs');
+runWorkflow('scheduled batch replay, pause, resume and cancellation',async({page,call,navigate,settle,mobile})=>{
+ const imported=await call('/api/import',{products:[{title_zh:'调度器验收商品',facts:'5 pieces',supplier:'Synthetic',source_sku:'SCHEDULER-ONLY',source_url:'https://example.test/scheduler'}]});
+ const body={name:'预约批次验收',request_id:'browser-scheduler-request',product_ids:imported.created,run_at:new Date(Date.now()+60000).toISOString()};
+ const run=await call('/api/automation/create',body);
+ assert.equal((await call('/api/automation/create',body)).id,run.id);
+ await navigate('automation');
+ await page.getByRole('heading',{name:'预约批次验收',exact:true}).waitFor();
+ let data=await page.evaluate(()=>autoData());
+ assert.equal(data.runs.length,1);assert.equal(data.items[0].step,0);assert.equal(data.items[0].status,'queued');
+ await page.locator(`[data-run="${run.id}"][data-run-action="pause"]`).click();await settle();
+ data=await page.evaluate(()=>autoData());assert.equal(data.runs[0].status,'paused');assert.equal(data.items[0].step,0);
+ await page.locator(`[data-run="${run.id}"][data-run-action="resume"]`).click();await settle();
+ data=await page.evaluate(()=>autoData());assert.equal(data.runs[0].status,'running');assert.equal(data.items[0].step,0,'resume must preserve future schedule');
+ await mobile();
+ await page.locator(`[data-run="${run.id}"][data-run-action="cancel_run"]`).click();await settle();
+ data=await page.evaluate(()=>autoData());assert.equal(data.runs[0].status,'cancelled');assert.equal(data.items[0].status,'cancelled');
+ const models=await page.evaluate(()=>modelData());assert.equal(models.calls.length,0);
+});

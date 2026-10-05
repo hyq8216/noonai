@@ -43,6 +43,78 @@ class SchedulerTests(unittest.TestCase):
         with self.app.store.connect() as c:
             return [dict(r) for r in c.execute('SELECT * FROM automation_items ORDER BY rowid')]
 
+    def test_idle_sleep_and_scheduled_deadline(self):
+        self.assertEqual(self.auto.next_delay(),30)
+        self.create(run_at=(self.clock()+timedelta(seconds=3)).isoformat())
+        self.assertTrue(self.auto.changed.is_set())
+        self.assertAlmostEqual(self.auto.next_delay(),3)
+        self.clock.advance(3)
+        self.assertEqual(self.auto.next_delay(),.05)
+
+    def test_approval_event_clears_only_approval_poll_not_model_quota(self):
+        self.create(2)
+        rows=self.rows()
+        with self.app.store.connect() as c:
+            for row,status,step in [(rows[0],'approval',2),(rows[1],'waiting',0)]:
+                c.execute('UPDATE automation_items SET status=?,step=?,data=? WHERE id=?',
+                    (status,step,json.dumps({'retry_at':(self.clock()+timedelta(hours=1)).isoformat()}),row['id']))
+        self.auto.wake(approval=True)
+        self.assertNotIn('retry_at',json.loads(self.rows()[0]['data']))
+        self.assertIn('retry_at',json.loads(self.rows()[1]['data']))
+        self.auto.tick()
+        self.assertNotEqual(self.rows()[0]['status'],'done')
+        self.assertEqual(self.rows()[1]['step'],0)
+
+    def test_finished_run_summary_updates_without_five_second_delay(self):
+        rid=self.create()
+        self.auto.tick()
+        with self.app.store.connect() as c:
+            c.execute("UPDATE automation_items SET step=3,status='queued' WHERE run_id=?",(rid,))
+        self.auto.tick()
+        with self.app.store.connect() as c:
+            self.assertEqual(c.execute('SELECT status FROM automation_runs WHERE id=?',(rid,)).fetchone()[0],'done')
+
+    def test_create_wakes_actual_idle_worker(self):
+        import threading
+        idle=threading.Event();processed=threading.Event()
+        original_delay=self.auto.next_delay
+        original_process=self.auto.process
+        def delay():
+            value=original_delay()
+            if value==30:idle.set()
+            return value
+        def process(item):
+            original_process(item);processed.set()
+        with patch.object(self.auto,'next_delay',side_effect=delay),patch.object(self.auto,'process',side_effect=process):
+            self.auto.start()
+            self.assertTrue(idle.wait(2),'worker must reach the idle wait')
+            self.create()
+            self.assertTrue(processed.wait(2),'new run must wake the 30-second idle wait')
+            self.auto.close()
+        self.assertGreaterEqual(self.rows()[0]['step'],1)
+
+    def test_wake_during_tick_is_not_lost(self):
+        import threading
+        completed=threading.Event()
+        count=[]
+        def tick():
+            count.append(1)
+            if len(count)==1:self.auto.wake()
+            else:self.auto.stop.set();self.auto.changed.set();completed.set()
+        with patch.object(self.auto,'tick',side_effect=tick),patch.object(self.auto,'next_delay',return_value=30):
+            self.auto.thread=threading.Thread(target=self.auto.loop)
+            self.auto.thread.start()
+            self.assertTrue(completed.wait(2),'wake arriving during tick must interrupt the following wait')
+            self.auto.close()
+        self.assertEqual(len(count),2)
+
+    def test_close_wakes_idle_thread(self):
+        import threading
+        self.auto.thread=threading.Thread(target=self.auto.loop)
+        self.auto.thread.start()
+        self.auto.close()
+        self.assertFalse(self.auto.thread.is_alive())
+
     def test_scheduled_run_uses_timezone_and_exact_deadline(self):
         due = self.clock() + timedelta(seconds=60)
         self.create(run_at=due.astimezone(timezone(timedelta(hours=8))).isoformat())

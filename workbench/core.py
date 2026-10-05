@@ -315,12 +315,18 @@ class Store:
         c.execute('UPDATE products SET approved_revision=revision WHERE id=?',(pid,))
         self.event(c,pid,'审核',f'确认内容版本 {revision}，尚未提交平台')
         return self.unpack(c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone())
-    def add_job(self, pid, kind, revision):
+    def add_job(self, pid, kind, revision, confirm_model_retry_after_prior_call=False):
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             p = self.unpack(c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone())
             if p['revision'] != revision:
                 raise Problem('商品版本已变化，请刷新',409)
+            prior_model_call=None
+            if kind=='translate' and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_calls'").fetchone():
+                prior_model_call=c.execute("SELECT m.id,m.status FROM jobs j JOIN model_calls m ON m.request_key='product-job:'||j.id WHERE j.product_id=? AND j.kind='translate' AND j.revision=? LIMIT 1",
+                                           (pid,revision)).fetchone()
+                if prior_model_call and confirm_model_retry_after_prior_call is not True:
+                    raise Problem('模型步骤已有调用记录；再次重试会发起新的调用，可能再次消耗订阅额度或产生API费用。请明确确认后再重试。',409)
             if kind == 'translate':
                 try: limit = max(0, min(1000, int(os.environ.get('TEXT_DAILY_LIMIT', '50'))))
                 except ValueError: raise Problem('TEXT_DAILY_LIMIT 配置无效', 409)
@@ -328,18 +334,48 @@ class Store:
                 if used >= limit: raise Problem(f'今日翻译任务已达到 {limit} 项上限（UTC日），请明天继续或调整本地配置', 409)
             if c.execute("SELECT 1 FROM jobs WHERE product_id=? AND status IN ('queued','running')", (pid,)).fetchone():
                 raise Problem('此商品已有任务在处理',409)
-            if kind == 'submit' and c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND revision=? AND status IN ('uncertain','needs_attention','interrupted')", (pid,revision)).fetchone():
-                raise Problem('当前版本此前提交结果待核对，请先回查 noon 或修改商品，不能直接重发',409)
+            if kind == 'submit' and c.execute("SELECT 1 FROM jobs WHERE product_id=? AND kind='submit' AND (status IN ('uncertain','interrupted') OR (status='needs_attention' AND revision=?))", (pid,revision)).fetchone():
+                raise Problem('该商品此前的 noon 提交回执仍待核对。请先按 SKU 回查并完成人工核对，系统不会自动重发',409)
             jid=ident(); ts=now()
             c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',(jid,pid,kind,revision,'queued','等待处理',None,ts,ts))
+            if prior_model_call:
+                self.event(c,pid,'确认重试模型翻译',f"操作员确认同版本已有模型调用记录（{prior_model_call['status']}），仍创建新的翻译任务 {jid}")
         return jid
     def job_result(self, jid, status, message, result=None):
         with self.connect() as c:
             c.execute('UPDATE jobs SET status=?,message=?,result=?,updated_at=? WHERE id=?',
                       (status,message,json.dumps(result,ensure_ascii=False) if result is not None else None,now(),jid))
+    def job_phase(self,jid,phase,message):
+        if phase not in ('preflight','submit_dispatching'):raise Problem('任务阶段无效')
+        with self.connect() as c:
+            changed=c.execute("UPDATE jobs SET result=?,message=?,updated_at=? WHERE id=? AND kind='submit' AND status='running'",
+                              (json.dumps({'phase':phase},ensure_ascii=False),message,now(),jid)).rowcount
+            if changed!=1:raise Problem('提交任务状态已变化，未发送请求',409)
+    def fail_job_safely(self,jid,message):
+        """Never turn a possibly-sent Noon write into a retryable failure."""
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT kind,status,result FROM jobs WHERE id=?',(jid,)).fetchone()
+            if not row or row['status']!='running':return
+            try:phase=json.loads(row['result'] or '{}').get('phase')
+            except (TypeError,ValueError):phase=None
+            if row['kind']=='submit' and phase!='preflight':
+                status='uncertain'
+                message='Noon提交请求可能已发送，但本地回执保存失败。请先按 SKU 回查，禁止直接重发当前版本'
+            else:status='failed'
+            c.execute('UPDATE jobs SET status=?,message=?,result=NULL,updated_at=? WHERE id=? AND status=\'running\'',
+                      (status,message,now(),jid))
     def recover_jobs(self):
         with self.connect() as c:
-            c.execute("UPDATE jobs SET status='interrupted',message='服务重启中断。提交类任务请先在平台核对，避免重复操作。',updated_at=? WHERE status IN ('queued','running')",(now(),))
+            ts=now()
+            # A queued callback has not claimed the durable job row and therefore
+            # cannot have sent an external request. Keep visual checks on their
+            # dedicated known-unsent recovery path; other work can be rescheduled.
+            c.execute("UPDATE jobs SET status='failed',message='服务关闭时任务仍在队列中，尚未发送外部请求；可安全重新安排。',updated_at=? WHERE status='queued' AND kind!='visual-check'",(ts,))
+            # Current submit workers persist a preflight marker before any Noon write.
+            # This state is known read-only work and can be explicitly scheduled again.
+            c.execute("UPDATE jobs SET status='failed',message='服务重启时仍在只读预检阶段；Noon商品提交尚未发送，可重新预检并安排。',updated_at=? WHERE kind='submit' AND status='running' AND CASE WHEN json_valid(result) THEN json_extract(result,'$.phase') END='preflight'",(ts,))
+            c.execute("UPDATE jobs SET status='interrupted',message=CASE WHEN kind='submit' THEN '服务重启时提交任务已开始执行；noon 是否收到请求未知。请按 SKU 回查后再决定是否重试。' ELSE '服务重启时任务已开始执行，处理结果待核对；系统未自动重放。' END,updated_at=? WHERE status='running' OR (status='queued' AND kind='visual-check')",(ts,))
     def history(self,include_detail=True):
         with self.connect() as c:
             active_jobs=c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]

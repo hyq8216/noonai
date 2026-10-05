@@ -46,8 +46,9 @@ class ReleaseTests(unittest.TestCase):
 
     def test_release_metadata_matches_installer(self):
         release=build.release_info()
-        self.assertEqual(release['version'],'0.43.0')
-        self.assertEqual(release['build'],'43')
+        # This release includes the cloud ERP deepening and compact navigation.
+        self.assertEqual(release['version'],'0.44.0')
+        self.assertEqual(release['build'],'44')
         self.assertTrue((DESKTOP/('INSTALL-'+release['version']+'.md')).is_file())
 
     def test_smoke_environment_does_not_inherit_provider_config(self):

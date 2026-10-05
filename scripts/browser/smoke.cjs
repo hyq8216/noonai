@@ -1,3 +1,4 @@
+const {clickNavigation}=require('./navigation_helpers.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -31,7 +32,7 @@ const { chromium } = require('playwright');
     page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(url);
-    await page.locator('[data-nav="automation"]').first().waitFor();
+    await page.locator('[data-nav="automation"]').first().waitFor({state:'attached'});
     await page.locator('#nav-search').fill('1688');
     assert.equal(await page.locator('.nav [data-nav]').count(),2,'domestic collection must be searchable by supplier name');
     await page.locator('#nav-search').fill('');
@@ -41,8 +42,8 @@ const { chromium } = require('playwright');
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       for (const view of views) {
-        await page.locator(`.nav [data-nav="${view}"]`).click();
-        await page.locator(`.nav [data-nav="${view}"][aria-current="page"]`).waitFor();
+        await clickNavigation(page,view);
+        await page.locator(`.nav [data-nav="${view}"][aria-current="page"]`).waitFor({state:'attached'});
         await page.locator('main h1').waitFor();
         await page.waitForTimeout(150);
         const overflow = await page.evaluate(() =>
