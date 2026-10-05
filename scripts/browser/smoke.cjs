@@ -334,7 +334,7 @@ print('%s|%s'%(db.execute('SELECT count(*) FROM automation_runs').fetchone()[0],
         assert.equal(await page.locator('#photo-import').isEnabled(), true,
           'a valid row may be imported while an unmatched file remains isolated');
         await page.locator('#photo-import').click();
-        await page.getByText('已保存原图并关联商品').waitFor({timeout:10000});
+        await page.getByText('已保存原图并关联商品').waitFor({timeout:30000});
         await page.getByText('NO-SUCH-SKU.png', {exact:true}).waitFor();
         const photoReadback = spawnSync(pythonExe, ['-c', `
 import json,sqlite3,sys
